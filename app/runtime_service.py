@@ -31,6 +31,22 @@ LABEL_METADATA: dict[int, dict[str, Any]] = {
     4: {"id": 4, "name": "右足組み", "severity": "warning"},
     5: {"id": 5, "name": "左足組み", "severity": "warning"},
 }
+NOTIFICATION_WARNING_LABEL_IDS = tuple(
+    label_id
+    for label_id, metadata in LABEL_METADATA.items()
+    if metadata.get("severity") == "warning"
+)
+
+
+def normalize_notification_label_ids(label_ids: list[int] | tuple[int, ...] | set[int]) -> list[int]:
+    return sorted(
+        {
+            int(label_id)
+            for label_id in label_ids
+            if int(label_id) in LABEL_METADATA
+            and LABEL_METADATA[int(label_id)].get("severity") == "warning"
+        }
+    )
 
 
 def utc_now() -> datetime:
@@ -61,14 +77,14 @@ def format_file_size(size_bytes: int) -> str:
 class NotificationSettings:
     enabled: bool = True
     threshold_seconds: int = DEFAULT_THRESHOLD_SECONDS
-    enabled_label_ids: list[int] = field(default_factory=lambda: [2, 3, 4, 5])
+    enabled_label_ids: list[int] = field(default_factory=lambda: list(NOTIFICATION_WARNING_LABEL_IDS))
     focus_mode: str = "indicator_only"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "threshold_seconds": self.threshold_seconds,
-            "enabled_label_ids": sorted(set(self.enabled_label_ids)),
+            "enabled_label_ids": normalize_notification_label_ids(self.enabled_label_ids),
             "focus_mode": self.focus_mode,
         }
 
@@ -77,12 +93,8 @@ class NotificationSettings:
         return cls(
             enabled=bool(payload.get("enabled", True)),
             threshold_seconds=max(10, int(payload.get("threshold_seconds", DEFAULT_THRESHOLD_SECONDS))),
-            enabled_label_ids=sorted(
-                {
-                    int(label_id)
-                    for label_id in payload.get("enabled_label_ids", [2, 3, 4, 5])
-                    if int(label_id) in LABEL_METADATA
-                }
+            enabled_label_ids=normalize_notification_label_ids(
+                payload.get("enabled_label_ids", list(NOTIFICATION_WARNING_LABEL_IDS))
             ),
             focus_mode=str(payload.get("focus_mode", "indicator_only")),
         )
@@ -211,10 +223,14 @@ class RuntimeSettingsStore:
             self.save(settings)
             return settings
 
-        payload = json.loads(self._path.read_text(encoding="utf-8"))
+        raw_text = self._path.read_text(encoding="utf-8")
+        payload = json.loads(raw_text)
         if not isinstance(payload, dict):
             raise ValueError(f"Settings file {self._path} must contain a JSON object")
-        return NotificationSettings.from_dict(payload)
+        settings = NotificationSettings.from_dict(payload)
+        if payload != settings.to_dict():
+            self.save(settings)
+        return settings
 
     def save(self, settings: NotificationSettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

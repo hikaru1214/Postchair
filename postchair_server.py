@@ -1,110 +1,105 @@
 from __future__ import annotations
 
 import argparse
-import json
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
+
+import uvicorn
+from fastapi import Body, FastAPI, Request
 
 from app.runtime_service import PostchairRuntimeService
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
 
-class PostchairRequestHandler(BaseHTTPRequestHandler):
-    service: PostchairRuntimeService
 
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
-            self._write_json(HTTPStatus.OK, self.service.health())
-            return
-        if self.path == "/api/status":
-            self._write_json(HTTPStatus.OK, self.service.backend_status())
-            return
-        if self.path == "/api/monitoring":
-            self._write_json(HTTPStatus.OK, self.service.monitoring_state())
-            return
-        if self.path == "/api/notifications":
-            self._write_json(HTTPStatus.OK, self.service.notification_settings())
-            return
-        if self.path == "/api/model":
-            self._write_json(HTTPStatus.OK, self.service.model_catalog())
-            return
-        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+def create_app(
+    service_factory: Callable[[], PostchairRuntimeService] = PostchairRuntimeService,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        service = service_factory()
+        app.state.service = service
+        try:
+            yield
+        finally:
+            service.stop_monitoring()
 
-    def do_POST(self) -> None:  # noqa: N802
-        payload = self._read_json_body()
-        if self.path == "/api/monitoring/start":
-            response = self.service.start_monitoring(
-                address=payload.get("address"),
-                device_name=payload.get("device_name", "ESP32_SmartSensor"),
-                scan_timeout=float(payload.get("scan_timeout", 5.0)),
-            )
-            self._write_json(HTTPStatus.OK, response)
-            return
-        if self.path == "/api/monitoring/stop":
-            self._write_json(HTTPStatus.OK, self.service.stop_monitoring())
-            return
-        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+    app = FastAPI(title="Postchair Local Backend", lifespan=lifespan)
 
-    def do_PUT(self) -> None:  # noqa: N802
-        payload = self._read_json_body()
-        if self.path == "/api/notifications":
-            self._write_json(
-                HTTPStatus.OK,
-                self.service.update_notification_settings(payload),
-            )
-            return
-        if self.path == "/api/model":
-            self._write_json(
-                HTTPStatus.OK,
-                self.service.select_model(str(payload.get("filename", ""))),
-            )
-            return
-        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+    def service_from(request: Request) -> PostchairRuntimeService:
+        return request.app.state.service
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-        return
+    @app.get("/health")
+    async def health(request: Request) -> dict[str, Any]:
+        return service_from(request).health()
 
-    def _read_json_body(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length == 0:
-            return {}
-        raw_body = self.rfile.read(content_length)
-        if not raw_body:
-            return {}
-        return json.loads(raw_body.decode("utf-8"))
+    @app.get("/api/status")
+    async def backend_status(request: Request) -> dict[str, Any]:
+        return service_from(request).backend_status()
 
-    def _write_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status.value)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    @app.get("/api/monitoring")
+    async def monitoring_state(request: Request) -> dict[str, Any]:
+        return service_from(request).monitoring_state()
+
+    @app.post("/api/monitoring/start")
+    async def start_monitoring(
+        request: Request,
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> dict[str, Any]:
+        return service_from(request).start_monitoring(
+            address=payload.get("address"),
+            device_name=str(payload.get("device_name", "ESP32_SmartSensor")),
+            scan_timeout=float(payload.get("scan_timeout", 5.0)),
+        )
+
+    @app.post("/api/monitoring/stop")
+    async def stop_monitoring(
+        request: Request,
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> dict[str, Any]:
+        del payload
+        return service_from(request).stop_monitoring()
+
+    @app.get("/api/notifications")
+    async def notification_settings(request: Request) -> dict[str, Any]:
+        return service_from(request).notification_settings()
+
+    @app.put("/api/notifications")
+    async def update_notification_settings(
+        request: Request,
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> dict[str, Any]:
+        return service_from(request).update_notification_settings(payload)
+
+    @app.get("/api/model")
+    async def model_catalog(request: Request) -> dict[str, Any]:
+        return service_from(request).model_catalog()
+
+    @app.put("/api/model")
+    async def select_model(
+        request: Request,
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> dict[str, Any]:
+        return service_from(request).select_model(str(payload.get("filename", "")))
+
+    return app
+
+
+app = create_app()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Postchair local HTTP backend.")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser = argparse.ArgumentParser(description="Postchair local FastAPI backend.")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    service = PostchairRuntimeService()
-    handler = type(
-        "BoundPostchairRequestHandler",
-        (PostchairRequestHandler,),
-        {"service": service},
-    )
-    server = ThreadingHTTPServer((args.host, args.port), handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        service.stop_monitoring()
-        server.server_close()
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

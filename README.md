@@ -112,12 +112,84 @@ uv run postchair-ble --address XX:XX:XX:XX:XX:XX --model-path
 - `models/`: 学習済みモデル出力先
 - `tests/`: ユニットテスト
 
+## ローカルサーバー方式
+
+macOS の Swift アプリは、Mac 内で起動している Python/FastAPI バックエンドに HTTP 接続します。  
+接続先は `http://127.0.0.1:8000` 固定です。
+
+### 起動手順
+
+#### 1. 依存関係を入れる
+
+```bash
+uv sync
+```
+
+#### 2. 必要なら学習済みモデルを作る
+
+`models/random_forest_label.joblib` がまだない場合は先に作成します。
+
+```bash
+uv run postchair-train
+```
+
+#### 3. Python バックエンドを手動で起動する場合
+
+プロジェクトルートで次を実行します。
+
+```bash
+uv run uvicorn postchair_server:app --host 127.0.0.1 --port 8000
+```
+
+起動後の確認:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+`{"ok":true,...}` のような JSON が返れば正常です。
+
+#### 4. Swift アプリから自動起動する場合
+
+Xcode で `ui/Postchair.xcodeproj` を開き、対象 Scheme の `Run > Arguments > Environment Variables` に次を設定してください。
+
+```text
+POSTCHAIR_BACKEND_ROOT=/Users/fujimakitaketo/projects/Postchair
+```
+
+必要なら Python 実行ファイルも明示します。
+
+```text
+POSTCHAIR_PYTHON_PATH=/Users/fujimakitaketo/projects/Postchair/.venv/bin/python
+```
+
+その後、Xcode から macOS アプリを起動します。  
+アプリは最初に `http://127.0.0.1:8000/health` を確認し、未起動なら内部で次のコマンド相当を実行します。
+
+```bash
+.venv/bin/python -m uvicorn postchair_server:app --host 127.0.0.1 --port 8000
+```
+
+`POSTCHAIR_BACKEND_ROOT` が未設定の場合は、現在の作業ディレクトリに `postchair_server.py` があるときだけ自動起動できます。
+
+### よく使う起動パターン
+
+手早く確認したい場合:
+
+1. ターミナルで `uv run uvicorn postchair_server:app --host 127.0.0.1 --port 8000`
+2. Xcode から Swift アプリを起動
+
+普段の開発で自動起動したい場合:
+
+1. Xcode Scheme に `POSTCHAIR_BACKEND_ROOT` を設定
+2. Xcode から Swift アプリを起動
+
 ## テスト
 
 テスト実行:
 
 ```bash
-uv run python -m unittest tests/test_parser.py tests/test_train_random_forest.py tests/test_live_classification.py
+uv run python -m unittest tests/test_parser.py tests/test_train_random_forest.py tests/test_live_classification.py tests/test_runtime_service.py
 ```
 
 ## よくある確認ポイント

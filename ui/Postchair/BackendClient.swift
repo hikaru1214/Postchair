@@ -1,7 +1,7 @@
 import Foundation
 
 struct BackendClient {
-    private let baseURL = URL(string: "http://127.0.0.1:8765")!
+    private let baseURL = URL(string: "http://127.0.0.1:8000")!
     private let encoder = JSONEncoder()
 
     func fetchBackendStatus() async throws -> BackendStatus {

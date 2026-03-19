@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import tempfile
-import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib import request
 
 import joblib
+from fastapi.testclient import TestClient
 from app.runtime_service import (
     ModelSelectionStore,
     NotificationSettings,
@@ -17,8 +16,7 @@ from app.runtime_service import (
 )
 from sklearn.ensemble import RandomForestClassifier
 from postchair_ble import FSRFrame
-from postchair_server import PostchairRequestHandler
-from http.server import ThreadingHTTPServer
+from postchair_server import create_app
 
 
 def write_model_file(path: Path) -> None:
@@ -85,6 +83,40 @@ class RuntimeServiceTests(unittest.TestCase):
             self.assertEqual(updated["enabled"], False)
             self.assertEqual(reloaded.notification_settings()["threshold_seconds"], 25)
             self.assertEqual(reloaded.notification_settings()["enabled_label_ids"], [2, 4])
+
+    def test_notification_settings_filter_non_warning_labels_on_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+
+            updated = service.update_notification_settings(
+                {"enabled_label_ids": [0, 1, 2, 3, 99]}
+            )
+
+            self.assertEqual(updated["enabled_label_ids"], [2, 3])
+
+    def test_notification_settings_filter_non_warning_labels_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                """
+{
+  "enabled": true,
+  "threshold_seconds": 60,
+  "enabled_label_ids": [0, 1, 2, 3],
+  "focus_mode": "indicator_only"
+}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            service = self.make_service(temp_dir)
+
+            self.assertEqual(service.notification_settings()["enabled_label_ids"], [2, 3])
+            persisted = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["enabled_label_ids"], [2, 3])
 
     def test_notification_triggers_at_eighty_percent_with_full_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -254,46 +286,64 @@ class RuntimeServerTests(unittest.TestCase):
             model_dir = Path(temp_dir) / "models"
             model_path = model_dir / "default.joblib"
             write_model_file(model_path)
-            service = PostchairRuntimeService(
-                settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
-                model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
-                model_path=model_path,
-                model_directory=model_dir,
-            )
-            handler = type(
-                "BoundHandler",
-                (PostchairRequestHandler,),
-                {"service": service},
-            )
-            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                base_url = f"http://127.0.0.1:{server.server_port}"
-                health = json.loads(request.urlopen(f"{base_url}/health").read().decode("utf-8"))
-                status = json.loads(
-                    request.urlopen(f"{base_url}/api/status").read().decode("utf-8")
+            app = create_app(
+                service_factory=lambda: PostchairRuntimeService(
+                    settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
+                    model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
+                    model_path=model_path,
+                    model_directory=model_dir,
                 )
-                model = json.loads(
-                    request.urlopen(f"{base_url}/api/model").read().decode("utf-8")
-                )
+            )
+
+            with TestClient(app) as client:
+                health = client.get("/health").json()
+                status = client.get("/api/status").json()
+                model = client.get("/api/model").json()
 
                 self.assertEqual(health["ok"], True)
                 self.assertIn("running", status)
                 self.assertIn("available_models", model)
 
-                req = request.Request(
-                    f"{base_url}/api/notifications",
-                    method="PUT",
-                    headers={"Content-Type": "application/json"},
-                    data=json.dumps({"threshold_seconds": 30}).encode("utf-8"),
-                )
-                settings = json.loads(request.urlopen(req).read().decode("utf-8"))
+                settings = client.put(
+                    "/api/notifications",
+                    json={"threshold_seconds": 30},
+                ).json()
                 self.assertEqual(settings["threshold_seconds"], 30)
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=2.0)
+
+    def test_lifespan_stops_monitoring_on_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "models"
+            model_path = model_dir / "default.joblib"
+            write_model_file(model_path)
+
+            class TrackingService(PostchairRuntimeService):
+                def __init__(self) -> None:
+                    super().__init__(
+                        settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
+                        model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
+                        model_path=model_path,
+                        model_directory=model_dir,
+                    )
+                    self.stop_calls = 0
+
+                def stop_monitoring(self) -> dict[str, object]:
+                    self.stop_calls += 1
+                    return super().stop_monitoring()
+
+            holder: dict[str, TrackingService] = {}
+
+            def service_factory() -> TrackingService:
+                service = TrackingService()
+                holder["service"] = service
+                return service
+
+            app = create_app(service_factory=service_factory)
+
+            with TestClient(app) as client:
+                response = client.get("/health")
+                self.assertEqual(response.status_code, 200)
+
+            self.assertEqual(holder["service"].stop_calls, 1)
 
 
 if __name__ == "__main__":

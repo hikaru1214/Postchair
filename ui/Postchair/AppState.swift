@@ -4,7 +4,7 @@ import Foundation
 import UserNotifications
 
 @MainActor
-final class AppState: ObservableObject {
+final class AppState: NSObject, ObservableObject {
     @Published var selectedSection: SidebarSection = .connection
     @Published var backendStatus = BackendStatus.placeholder
     @Published var monitoringState = MonitoringState.placeholder
@@ -85,6 +85,7 @@ final class AppState: ObservableObject {
         guard !didPrepare else { return }
         didPrepare = true
         isLoading = true
+        UNUserNotificationCenter.current().delegate = self
         await requestNotificationPermission()
         do {
             try await processManager.startIfNeeded()
@@ -175,6 +176,7 @@ final class AppState: ObservableObject {
     }
 
     func sendTestNotification() async {
+        guard await ensureNotificationPermission() else { return }
         let content = UNMutableNotificationContent()
         content.title = "Postchair テスト通知"
         content.body = "通知設定は正常です。"
@@ -187,7 +189,7 @@ final class AppState: ObservableObject {
         pollingTask?.cancel()
         pollingTask = Task {
             while !Task.isCancelled {
-                await refreshAll()
+                await refreshLiveState()
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -230,6 +232,11 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func refreshLiveState() async {
+        await refreshBackendStatus()
+        await refreshMonitoringState()
+    }
+
     private func refreshModelCatalog() async {
         do {
             modelCatalog = try await backendClient.fetchModelCatalog()
@@ -266,17 +273,27 @@ final class AppState: ObservableObject {
     }
 
     private func requestNotificationPermission() async {
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        _ = await ensureNotificationPermission()
+    }
+
+    private func ensureNotificationPermission() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        let settings = await center.notificationSettings()
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral:
             notificationAuthorizationSummary = "許可済み"
+            return true
         case .denied:
             notificationAuthorizationSummary = "拒否"
+            return false
         case .notDetermined:
             notificationAuthorizationSummary = "未決定"
+            return false
         @unknown default:
             notificationAuthorizationSummary = "不明"
+            return false
         }
     }
 
@@ -290,5 +307,14 @@ final class AppState: ObservableObject {
         if frameHistory.count > 120 {
             frameHistory.removeFirst(frameHistory.count - 120)
         }
+    }
+}
+
+extension AppState: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
     }
 }

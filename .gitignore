@@ -1,3 +1,14 @@
 .venv/
 .uv-cache/
 __pycache__/
+
+# Xcode
+.xcode-derived/
+DerivedData/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+**/xcuserdata/
+**/xcuserdata/**
+**/*.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/

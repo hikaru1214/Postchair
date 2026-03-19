@@ -1,8 +1,8 @@
 import Foundation
 
 actor BackendProcessManager {
-    private let backendRootURL = URL(fileURLWithPath: "/Users/hikaru/code/Postchair", isDirectory: true)
-    private let serverPort = 8765
+    private let serverHost = "127.0.0.1"
+    private let serverPort = 8000
     private var ownedProcess: Process?
 
     func startIfNeeded() async throws {
@@ -10,13 +10,18 @@ actor BackendProcessManager {
             return
         }
         if ownedProcess?.isRunning == true {
+            try await waitForHealthyServer()
             return
         }
 
         let process = Process()
-        process.currentDirectoryURL = backendRootURL
-        process.executableURL = pythonExecutableURL()
-        process.arguments = ["postchair_server.py", "--host", "127.0.0.1", "--port", "\(serverPort)"]
+        process.currentDirectoryURL = try backendRootURL()
+        process.executableURL = try pythonExecutableURL()
+        process.arguments = [
+            "-m", "uvicorn", "postchair_server:app",
+            "--host", serverHost,
+            "--port", "\(serverPort)",
+        ]
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -25,12 +30,7 @@ actor BackendProcessManager {
         try process.run()
         ownedProcess = process
 
-        for _ in 0 ..< 30 {
-            if try await isHealthy() {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(250))
-        }
+        try await waitForHealthyServer()
 
         if process.isRunning {
             throw BackendProcessError.launchFailed("バックエンドは起動しましたが、ヘルスチェックに応答しませんでした。")
@@ -51,7 +51,7 @@ actor BackendProcessManager {
     }
 
     private func isHealthy() async throws -> Bool {
-        let url = URL(string: "http://127.0.0.1:\(serverPort)/health")!
+        let url = URL(string: "http://\(serverHost):\(serverPort)/health")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 0.5
         do {
@@ -63,7 +63,55 @@ actor BackendProcessManager {
         }
     }
 
-    private func pythonExecutableURL() -> URL {
+    private func waitForHealthyServer() async throws {
+        for _ in 0 ..< 30 {
+            if try await isHealthy() {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+    }
+
+    private func backendRootURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let configured = environment["POSTCHAIR_BACKEND_ROOT"], !configured.isEmpty {
+            let url = URL(fileURLWithPath: configured, isDirectory: true)
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent("postchair_server.py").path) {
+                return url
+            }
+            throw BackendProcessError.launchFailed(
+                "POSTCHAIR_BACKEND_ROOT に postchair_server.py が見つかりません: \(configured)"
+            )
+        }
+
+        let currentDirectoryURL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        if FileManager.default.fileExists(
+            atPath: currentDirectoryURL.appendingPathComponent("postchair_server.py").path
+        ) {
+            return currentDirectoryURL
+        }
+
+        throw BackendProcessError.launchFailed(
+            "バックエンドのルートが見つかりません。Xcode の Environment Variables に POSTCHAIR_BACKEND_ROOT を設定してください。"
+        )
+    }
+
+    private func pythonExecutableURL() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let configured = environment["POSTCHAIR_PYTHON_PATH"], !configured.isEmpty {
+            let url = URL(fileURLWithPath: configured)
+            if FileManager.default.isExecutableFile(atPath: url.path) {
+                return url
+            }
+            throw BackendProcessError.launchFailed(
+                "POSTCHAIR_PYTHON_PATH が実行可能ではありません: \(configured)"
+            )
+        }
+
+        let backendRootURL = try backendRootURL()
         let venvPython = backendRootURL.appendingPathComponent(".venv/bin/python")
         if FileManager.default.fileExists(atPath: venvPython.path) {
             return venvPython

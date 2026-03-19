@@ -378,6 +378,12 @@ struct NotificationSettingsPayload: Codable {
     let enabledLabelIDs: [Int]
     let focusMode: String
 
+    private static let allowedNotificationLabelIDs = Set([2, 3, 4, 5])
+
+    private static func normalizedLabelIDs(_ ids: [Int]) -> [Int] {
+        Array(Set(ids).intersection(allowedNotificationLabelIDs)).sorted()
+    }
+
     enum CodingKeys: String, CodingKey {
         case enabled
         case thresholdSeconds = "threshold_seconds"
@@ -388,7 +394,7 @@ struct NotificationSettingsPayload: Codable {
     init(enabled: Bool, thresholdSeconds: Int, enabledLabelIDs: [Int], focusMode: String) {
         self.enabled = enabled
         self.thresholdSeconds = thresholdSeconds
-        self.enabledLabelIDs = enabledLabelIDs
+        self.enabledLabelIDs = Self.normalizedLabelIDs(enabledLabelIDs)
         self.focusMode = focusMode
     }
 
@@ -396,14 +402,16 @@ struct NotificationSettingsPayload: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         thresholdSeconds = try container.decodeIfPresent(Int.self, forKey: .thresholdSeconds) ?? 60
-        enabledLabelIDs = try container.decodeIfPresent([Int].self, forKey: .enabledLabelIDs) ?? [2, 3, 4, 5]
+        enabledLabelIDs = Self.normalizedLabelIDs(
+            try container.decodeIfPresent([Int].self, forKey: .enabledLabelIDs) ?? [2, 3, 4, 5]
+        )
         focusMode = try container.decodeIfPresent(String.self, forKey: .focusMode) ?? "indicator_only"
     }
 
     init(dictionary: [String: Any]) {
         enabled = dictionary["enabled"] as? Bool ?? true
         thresholdSeconds = dictionary["threshold_seconds"] as? Int ?? 60
-        enabledLabelIDs = dictionary["enabled_label_ids"] as? [Int] ?? [2, 3, 4, 5]
+        enabledLabelIDs = Self.normalizedLabelIDs(dictionary["enabled_label_ids"] as? [Int] ?? [2, 3, 4, 5])
         focusMode = dictionary["focus_mode"] as? String ?? "indicator_only"
     }
 }
@@ -519,8 +527,6 @@ struct NotificationSettingsState {
     }
 
     static let defaultLabels = [
-        PostureLabelConfig(id: 0, name: "離席", severity: "neutral"),
-        PostureLabelConfig(id: 1, name: "良い姿勢", severity: "positive"),
         PostureLabelConfig(id: 2, name: "猫背", severity: "warning"),
         PostureLabelConfig(id: 3, name: "前傾姿勢", severity: "warning"),
         PostureLabelConfig(id: 4, name: "右足組み", severity: "warning"),

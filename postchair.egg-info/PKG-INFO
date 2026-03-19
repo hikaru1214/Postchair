@@ -4,5 +4,8 @@ Version: 0.1.0
 Summary: BLE client for receiving FSR data from the Postchair ESP32 device.
 Requires-Python: >=3.12
 Requires-Dist: bleak>=2.1.1
+Requires-Dist: fastapi>=0.122.0
+Requires-Dist: httpx>=0.28.1
 Requires-Dist: joblib>=1.4.2
 Requires-Dist: scikit-learn>=1.7.1
+Requires-Dist: uvicorn>=0.38.0

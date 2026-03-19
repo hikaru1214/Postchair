@@ -3,7 +3,6 @@ import SwiftUI
 
 struct DashboardWindowView: View {
     @EnvironmentObject private var appState: AppState
-    private let refreshTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -26,11 +25,6 @@ struct DashboardWindowView: View {
                 }
             }
             .padding(28)
-        }
-        .onReceive(refreshTimer) { _ in
-            Task {
-                await appState.refreshNow()
-            }
         }
     }
 
@@ -265,7 +259,7 @@ struct NotificationSectionView: View {
                     .font(.system(size: 19, weight: .bold))
                     .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
 
-                ForEach(appState.notificationSettings.labelConfigurations.filter { $0.id != 0 }) { label in
+                ForEach(appState.notificationSettings.labelConfigurations) { label in
                     HStack {
                         Text(label.name)
                             .font(.system(size: 18, weight: .semibold))
@@ -293,9 +287,9 @@ struct NotificationSectionView: View {
                 MetricRow(title: "最終通知", value: appState.monitoringState.notificationEvent.triggeredAt ?? "未通知")
                 MetricRow(
                     title: "通知対象数",
-                    value: "\(appState.notificationSettings.enabledLabelIDs.filter { $0 != 0 }.count)姿勢"
+                    value: "\(appState.notificationSettings.enabledLabelIDs.count)姿勢"
                 )
-                Text("直近の通知時間内で同じ悪姿勢が全ログの80%以上を占めたときに通知します。比率が80%未満に戻ると、次回は再通知されます。")
+                Text("設定した継続時間の中で、同じ悪姿勢が全ログの80%以上を占めたときだけ通知します。猫背と前傾姿勢の合算では通知しません。比率が80%未満に戻ると、次回は再通知されます。")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
 

@@ -16,9 +16,10 @@ dependencies = [
 [project.scripts]
 postchair-ble = "postchair_ble:main"
 postchair-train = "app.train_random_forest:main"
+postchair-server = "postchair_server:main"
 
 [tool.setuptools]
-py-modules = ["main", "postchair_ble"]
+py-modules = ["main", "postchair_ble", "postchair_server"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

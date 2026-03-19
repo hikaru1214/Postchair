@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "threshold_seconds": 60,
+  "enabled_label_ids": [
+    1,
+    2,
+    3
+  ],
+  "focus_mode": "indicator_only"
+}

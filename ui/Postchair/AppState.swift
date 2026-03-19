@@ -3,6 +3,51 @@ import Combine
 import Foundation
 import UserNotifications
 
+struct AppNotificationSettings {
+    let authorizationStatus: UNAuthorizationStatus
+    let alertSetting: UNNotificationSetting
+}
+
+@MainActor
+protocol NotificationCenterProtocol: AnyObject {
+    var delegate: UNUserNotificationCenterDelegate? { get set }
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool
+    func notificationSettings() async -> AppNotificationSettings
+    func add(_ request: UNNotificationRequest) async throws
+}
+
+@MainActor
+final class SystemNotificationCenter: NotificationCenterProtocol {
+    static let shared = SystemNotificationCenter()
+
+    private let center: UNUserNotificationCenter
+
+    init(center: UNUserNotificationCenter = .current()) {
+        self.center = center
+    }
+
+    var delegate: UNUserNotificationCenterDelegate? {
+        get { center.delegate }
+        set { center.delegate = newValue }
+    }
+
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
+        try await center.requestAuthorization(options: options)
+    }
+
+    func notificationSettings() async -> AppNotificationSettings {
+        let settings = await center.notificationSettings()
+        return AppNotificationSettings(
+            authorizationStatus: settings.authorizationStatus,
+            alertSetting: settings.alertSetting
+        )
+    }
+
+    func add(_ request: UNNotificationRequest) async throws {
+        try await center.add(request)
+    }
+}
+
 @MainActor
 final class AppState: NSObject, ObservableObject {
     @Published var selectedSection: SidebarSection = .connection
@@ -16,12 +61,31 @@ final class AppState: NSObject, ObservableObject {
     @Published var notificationAuthorizationSummary = "確認中"
     @Published var isNightModeEnabled = UserDefaults.standard.bool(forKey: "postchair.nightModeEnabled")
 
-    private let backendClient = BackendClient()
-    private let processManager = BackendProcessManager()
+    private let backendClient: BackendClientProtocol
+    private let processManager: any BackendProcessManaging
+    private var notificationCenter: NotificationCenterProtocol
     private var didPrepare = false
     private var pollingTask: Task<Void, Never>?
     private var lastDeliveredNotificationSequence = 0
     private var lastRecordedFrameTimestamp: String?
+
+    override init() {
+        self.backendClient = BackendClient()
+        self.processManager = BackendProcessManager()
+        self.notificationCenter = SystemNotificationCenter.shared
+        super.init()
+    }
+
+    init(
+        backendClient: BackendClientProtocol,
+        processManager: any BackendProcessManaging,
+        notificationCenter: NotificationCenterProtocol
+    ) {
+        self.backendClient = backendClient
+        self.processManager = processManager
+        self.notificationCenter = notificationCenter
+        super.init()
+    }
 
     var menuBarTitle: String {
         switch monitoringState.resolvedConnectionState {
@@ -85,7 +149,7 @@ final class AppState: NSObject, ObservableObject {
         guard !didPrepare else { return }
         didPrepare = true
         isLoading = true
-        UNUserNotificationCenter.current().delegate = self
+        notificationCenter.delegate = self
         await requestNotificationPermission()
         do {
             try await processManager.startIfNeeded()
@@ -245,11 +309,15 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
-    private func deliverNotificationIfNeeded(from event: NotificationEventPayload) async {
+    func deliverNotificationIfNeeded(from event: NotificationEventPayload) async {
         guard event.sequence > lastDeliveredNotificationSequence else { return }
-        lastDeliveredNotificationSequence = event.sequence
         guard notificationSettings.enabled else { return }
+        guard let labelID = event.labelID else { return }
+        guard notificationSettings.enabledLabelIDs.contains(labelID) else { return }
         guard let labelName = resolvedLabelName(for: event.labelID, backendName: event.label?.name) else { return }
+        let settings = await notificationCenter.notificationSettings()
+        guard isNotificationAuthorized(settings.authorizationStatus) else { return }
+        guard settings.alertSetting != .disabled else { return }
 
         let content = UNMutableNotificationContent()
         content.title = "姿勢アラート"
@@ -261,7 +329,12 @@ final class AppState: NSObject, ObservableObject {
             content: content,
             trigger: nil
         )
-        try? await UNUserNotificationCenter.current().add(request)
+        do {
+            try await notificationCenter.add(request)
+            lastDeliveredNotificationSequence = event.sequence
+        } catch {
+            backendLaunchError = "ローカル通知の登録に失敗しました: \(error.localizedDescription)"
+        }
     }
 
     private func resolvedLabelName(for labelID: Int?, backendName: String?) -> String? {
@@ -277,10 +350,9 @@ final class AppState: NSObject, ObservableObject {
     }
 
     private func ensureNotificationPermission() async -> Bool {
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-        let settings = await center.notificationSettings()
+        notificationCenter.delegate = self
+        _ = try? await notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])
+        let settings = await notificationCenter.notificationSettings()
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral:
             notificationAuthorizationSummary = "許可済み"
@@ -297,6 +369,17 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
+    private func isNotificationAuthorized(_ status: UNAuthorizationStatus) -> Bool {
+        switch status {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied, .notDetermined:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
     private func recordHistoryIfNeeded() {
         guard let frame = monitoringState.latestFrame else { return }
         guard !frame.receivedAt.isEmpty else { return }
@@ -307,6 +390,10 @@ final class AppState: NSObject, ObservableObject {
         if frameHistory.count > 120 {
             frameHistory.removeFirst(frameHistory.count - 120)
         }
+    }
+
+    var deliveredNotificationSequenceForTesting: Int {
+        lastDeliveredNotificationSequence
     }
 }
 

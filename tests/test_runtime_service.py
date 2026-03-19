@@ -38,6 +38,8 @@ class RuntimeServiceTests(unittest.TestCase):
         service: PostchairRuntimeService,
         start: datetime,
         labels: list[int],
+        *,
+        step_seconds: float = 1.0,
     ) -> None:
         for offset, label_id in enumerate(labels):
             service.ingest_frame(
@@ -46,7 +48,7 @@ class RuntimeServiceTests(unittest.TestCase):
                     20 + offset,
                     30 + offset,
                     40 + offset,
-                    received_at=start + timedelta(seconds=offset),
+                    received_at=start + timedelta(seconds=offset * step_seconds),
                 ),
                 predicted_label=label_id,
             )
@@ -150,6 +152,10 @@ class RuntimeServiceTests(unittest.TestCase):
             start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
             self.ingest_labels(service, start, [2] * 10)
             self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+            self.assertEqual(
+                service.monitoring_state()["notification_debug"]["blocked_reason"],
+                "window_not_filled",
+            )
 
     def test_notification_does_not_trigger_at_seventy_nine_percent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,6 +172,10 @@ class RuntimeServiceTests(unittest.TestCase):
             start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
             self.ingest_labels(service, start, [2] * 8 + [1, 1, 1])
             self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+            self.assertEqual(
+                service.monitoring_state()["notification_debug"]["blocked_reason"],
+                "ratio_below_threshold",
+            )
 
     def test_notification_does_not_trigger_for_mixed_bad_postures(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -182,6 +192,77 @@ class RuntimeServiceTests(unittest.TestCase):
             start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
             self.ingest_labels(service, start, [2, 3] * 5 + [2])
             self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+            self.assertEqual(
+                service.monitoring_state()["notification_debug"]["blocked_reason"],
+                "ratio_below_threshold",
+            )
+
+    def test_notification_debug_reports_triggered_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 11)
+            debug = service.monitoring_state()["notification_debug"]
+            self.assertEqual(debug["blocked_reason"], "triggered")
+            self.assertEqual(debug["qualifying_label_ids"], [2])
+            self.assertEqual(debug["counts_by_label_id"], {2: 11})
+
+    def test_notification_triggers_with_dense_sampling_after_threshold_elapsed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [3] * 101, step_seconds=0.1)
+            state = service.monitoring_state()
+            self.assertEqual(state["notification_event"]["sequence"], 1)
+            self.assertEqual(state["notification_event"]["label_id"], 3)
+            self.assertEqual(state["notification_debug"]["blocked_reason"], "triggered")
+
+    def test_notification_waits_for_longer_threshold_before_triggering(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=180,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [3] * 180, step_seconds=1.0)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+            self.assertEqual(
+                service.monitoring_state()["notification_debug"]["blocked_reason"],
+                "window_not_filled",
+            )
+
+            service.ingest_frame(
+                FSRFrame(100, 100, 100, 100, received_at=start + timedelta(seconds=180)),
+                predicted_label=3,
+            )
+            state = service.monitoring_state()
+            self.assertEqual(state["notification_event"]["sequence"], 1)
+            self.assertEqual(state["notification_event"]["label_id"], 3)
+            self.assertEqual(state["notification_debug"]["blocked_reason"], "triggered")
 
     def test_notification_retriggers_after_ratio_drops_below_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

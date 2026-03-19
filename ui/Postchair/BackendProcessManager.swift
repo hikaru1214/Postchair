@@ -1,6 +1,11 @@
 import Foundation
 
-actor BackendProcessManager {
+protocol BackendProcessManaging: Actor {
+    func startIfNeeded() async throws
+    func stopOwnedProcess() async
+}
+
+actor BackendProcessManager: BackendProcessManaging {
     private let serverHost = "127.0.0.1"
     private let serverPort = 8000
     private var ownedProcess: Process?
@@ -32,10 +37,11 @@ actor BackendProcessManager {
 
         try await waitForHealthyServer()
 
-        if process.isRunning {
-            throw BackendProcessError.launchFailed("バックエンドは起動しましたが、ヘルスチェックに応答しませんでした。")
-        }
-        throw BackendProcessError.launchFailed(readPipe(stderr))
+        try Self.validateLaunchState(
+            isHealthy: try await isHealthy(),
+            processIsRunning: process.isRunning,
+            stderrText: readPipe(stderr)
+        )
     }
 
     func stopOwnedProcess() async {
@@ -125,6 +131,20 @@ actor BackendProcessManager {
             return "バックエンドを起動できませんでした。"
         }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    static func validateLaunchState(
+        isHealthy: Bool,
+        processIsRunning: Bool,
+        stderrText: String
+    ) throws {
+        if isHealthy {
+            return
+        }
+        if processIsRunning {
+            throw BackendProcessError.launchFailed("バックエンドは起動中ですが、ヘルスチェックに応答しませんでした。")
+        }
+        throw BackendProcessError.launchFailed(stderrText)
     }
 }
 

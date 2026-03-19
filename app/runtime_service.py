@@ -116,6 +116,30 @@ class NotificationEvent:
 
 
 @dataclass(slots=True)
+class NotificationDebugState:
+    observation_count: int = 0
+    window_seconds: int = 0
+    window_span_seconds: float = 0.0
+    counts_by_label_id: dict[int, int] = field(default_factory=dict)
+    qualifying_label_ids: list[int] = field(default_factory=list)
+    active_notification_label_ids: list[int] = field(default_factory=list)
+    last_evaluated_label_id: int | None = None
+    blocked_reason: str = "idle"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "observation_count": self.observation_count,
+            "window_seconds": self.window_seconds,
+            "window_span_seconds": round(self.window_span_seconds, 3),
+            "counts_by_label_id": self.counts_by_label_id,
+            "qualifying_label_ids": self.qualifying_label_ids,
+            "active_notification_label_ids": self.active_notification_label_ids,
+            "last_evaluated_label_id": self.last_evaluated_label_id,
+            "blocked_reason": self.blocked_reason,
+        }
+
+
+@dataclass(slots=True)
 class NotificationObservation:
     label_id: int | None
     observed_at: datetime
@@ -126,10 +150,14 @@ class NotificationTracker:
     observations: deque[NotificationObservation] = field(default_factory=deque)
     active_notifications: set[int] = field(default_factory=set)
     event: NotificationEvent = field(default_factory=NotificationEvent)
+    debug_state: NotificationDebugState = field(default_factory=NotificationDebugState)
+    history_started_at: datetime | None = None
 
     def reset(self) -> None:
         self.observations.clear()
         self.active_notifications.clear()
+        self.history_started_at = None
+        self.debug_state = NotificationDebugState(blocked_reason="idle")
 
     def _prune_observations(self, observed_at: datetime, threshold_seconds: int) -> None:
         window_start = observed_at.timestamp() - threshold_seconds
@@ -144,26 +172,59 @@ class NotificationTracker:
     ) -> NotificationEvent | None:
         if not settings.enabled:
             self.reset()
+            self.debug_state.blocked_reason = "notifications_disabled"
             return None
+
+        if self.history_started_at is None:
+            self.history_started_at = observed_at
 
         self.observations.append(NotificationObservation(label_id=label_id, observed_at=observed_at))
         self._prune_observations(observed_at, settings.threshold_seconds)
         total_count = len(self.observations)
+        counts = Counter(observation.label_id for observation in self.observations)
+        counts_by_label_id = {
+            int(candidate_label_id): count
+            for candidate_label_id, count in counts.items()
+            if candidate_label_id is not None
+        }
+        window_span_seconds = 0.0
+        if self.observations:
+            window_span_seconds = (
+                observed_at - self.observations[0].observed_at
+            ).total_seconds()
+        elapsed_since_history_start = 0.0
+        if self.history_started_at is not None:
+            elapsed_since_history_start = (
+                observed_at - self.history_started_at
+            ).total_seconds()
+        self.debug_state = NotificationDebugState(
+            observation_count=total_count,
+            window_seconds=settings.threshold_seconds,
+            window_span_seconds=window_span_seconds,
+            counts_by_label_id=counts_by_label_id,
+            active_notification_label_ids=sorted(self.active_notifications),
+            last_evaluated_label_id=label_id,
+            blocked_reason="evaluating",
+        )
         if total_count == 0:
+            self.debug_state.blocked_reason = "no_observations"
             return None
-        if (observed_at - self.observations[0].observed_at).total_seconds() < settings.threshold_seconds:
+        if elapsed_since_history_start < settings.threshold_seconds:
+            self.debug_state.blocked_reason = "window_not_filled"
             return None
 
-        counts = Counter(observation.label_id for observation in self.observations)
         qualifying_label_ids = [
             candidate_label_id
             for candidate_label_id in settings.enabled_label_ids
             if counts.get(candidate_label_id, 0) / total_count >= 0.8
         ]
+        self.debug_state.qualifying_label_ids = qualifying_label_ids
 
         active_now = set(qualifying_label_ids)
         self.active_notifications.intersection_update(active_now)
+        self.debug_state.active_notification_label_ids = sorted(self.active_notifications)
         if not qualifying_label_ids:
+            self.debug_state.blocked_reason = "ratio_below_threshold"
             return None
 
         if label_id in qualifying_label_ids:
@@ -172,12 +233,15 @@ class NotificationTracker:
             selected_label_id = qualifying_label_ids[0]
 
         if selected_label_id in self.active_notifications:
+            self.debug_state.blocked_reason = "already_notified"
             return None
 
         self.event.sequence += 1
         self.event.label_id = selected_label_id
         self.event.triggered_at = observed_at
         self.active_notifications.add(selected_label_id)
+        self.debug_state.active_notification_label_ids = sorted(self.active_notifications)
+        self.debug_state.blocked_reason = "triggered"
         return self.event
 
 
@@ -195,6 +259,7 @@ class MonitoringSnapshot:
     started_at: datetime | None = None
     last_frame_at: datetime | None = None
     notification_event: NotificationEvent = field(default_factory=NotificationEvent)
+    notification_debug: NotificationDebugState = field(default_factory=NotificationDebugState)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -210,6 +275,7 @@ class MonitoringSnapshot:
             "started_at": isoformat_or_none(self.started_at),
             "last_frame_at": isoformat_or_none(self.last_frame_at),
             "notification_event": self.notification_event.to_dict(),
+            "notification_debug": self.notification_debug.to_dict(),
         }
 
 
@@ -427,6 +493,16 @@ class PostchairRuntimeService:
             self._snapshot.latest_label_id = label_id
             self._snapshot.latest_label_metadata = LABEL_METADATA.get(label_id)
             event = self._tracker.evaluate(label_id, observed_at, self._settings)
+            self._snapshot.notification_debug = NotificationDebugState(
+                observation_count=self._tracker.debug_state.observation_count,
+                window_seconds=self._tracker.debug_state.window_seconds,
+                window_span_seconds=self._tracker.debug_state.window_span_seconds,
+                counts_by_label_id=dict(self._tracker.debug_state.counts_by_label_id),
+                qualifying_label_ids=list(self._tracker.debug_state.qualifying_label_ids),
+                active_notification_label_ids=list(self._tracker.debug_state.active_notification_label_ids),
+                last_evaluated_label_id=self._tracker.debug_state.last_evaluated_label_id,
+                blocked_reason=self._tracker.debug_state.blocked_reason,
+            )
             if event is not None:
                 self._snapshot.notification_event = NotificationEvent(
                     sequence=event.sequence,

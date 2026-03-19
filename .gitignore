@@ -1,6 +1,7 @@
 .venv/
 .uv-cache/
 __pycache__/
+.DS_Store
 
 # Xcode
 .xcode-derived/
@@ -12,3 +13,6 @@ DerivedData/
 **/xcuserdata/**
 **/*.xcworkspace/xcuserdata/
 **/*.xcodeproj/xcuserdata/
+
+# Swift Package Manager
+.build/

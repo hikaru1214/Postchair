@@ -1,8 +1,29 @@
 import Foundation
 
-struct BackendClient {
-    private let baseURL = URL(string: "http://127.0.0.1:8000")!
+@MainActor
+protocol BackendClientProtocol {
+    func fetchBackendStatus() async throws -> BackendStatus
+    func fetchMonitoringState() async throws -> MonitoringState
+    func startMonitoring() async throws -> MonitoringState
+    func stopMonitoring() async throws -> MonitoringState
+    func fetchNotificationSettings() async throws -> NotificationSettingsPayload
+    func fetchModelCatalog() async throws -> ModelCatalog
+    func updateNotificationSettings(
+        enabled: Bool,
+        thresholdSeconds: Int,
+        enabledLabelIDs: [Int],
+        focusMode: String
+    ) async throws -> NotificationSettingsPayload
+    func updateSelectedModel(filename: String) async throws -> ModelCatalog
+}
+
+struct BackendClient: BackendClientProtocol {
+    private let baseURL: URL
     private let encoder = JSONEncoder()
+
+    init(baseURL: URL = URL(string: "http://127.0.0.1:8000")!) {
+        self.baseURL = baseURL
+    }
 
     func fetchBackendStatus() async throws -> BackendStatus {
         BackendStatus(dictionary: try await requestObject(path: "/api/status", method: "GET", body: nil))
@@ -36,20 +57,11 @@ struct BackendClient {
         enabledLabelIDs: [Int],
         focusMode: String
     ) async throws -> NotificationSettingsPayload {
-        struct Payload: Encodable {
-            let enabled: Bool
-            let thresholdSeconds: Int
-            let enabledLabelIDs: [Int]
-            let focusMode: String
-        }
-
-        let body = try encoder.encode(
-            Payload(
-                enabled: enabled,
-                thresholdSeconds: thresholdSeconds,
-                enabledLabelIDs: enabledLabelIDs,
-                focusMode: focusMode
-            )
+        let body = try makeNotificationSettingsBody(
+            enabled: enabled,
+            thresholdSeconds: thresholdSeconds,
+            enabledLabelIDs: enabledLabelIDs,
+            focusMode: focusMode
         )
         return NotificationSettingsPayload(dictionary: try await requestObject(path: "/api/notifications", method: "PUT", body: body))
     }
@@ -61,6 +73,36 @@ struct BackendClient {
 
         let body = try encoder.encode(Payload(filename: filename))
         return ModelCatalog(dictionary: try await requestObject(path: "/api/model", method: "PUT", body: body))
+    }
+
+    func makeNotificationSettingsBody(
+        enabled: Bool,
+        thresholdSeconds: Int,
+        enabledLabelIDs: [Int],
+        focusMode: String
+    ) throws -> Data {
+        struct Payload: Encodable {
+            let enabled: Bool
+            let thresholdSeconds: Int
+            let enabledLabelIDs: [Int]
+            let focusMode: String
+
+            enum CodingKeys: String, CodingKey {
+                case enabled
+                case thresholdSeconds = "threshold_seconds"
+                case enabledLabelIDs = "enabled_label_ids"
+                case focusMode = "focus_mode"
+            }
+        }
+
+        return try encoder.encode(
+            Payload(
+                enabled: enabled,
+                thresholdSeconds: thresholdSeconds,
+                enabledLabelIDs: enabledLabelIDs,
+                focusMode: focusMode
+            )
+        )
     }
 
     private func requestObject(path: String, method: String, body: Data?) async throws -> [String: Any] {

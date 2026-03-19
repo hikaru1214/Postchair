@@ -6,12 +6,21 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
+from pydantic import BaseModel
 
 from app.runtime_service import PostchairRuntimeService
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+
+
+class TrainingRecordingRequest(BaseModel):
+    label_id: int | None = None
+
+
+class TrainingCompleteRequest(BaseModel):
+    model_name: str
 
 
 def create_app(
@@ -83,6 +92,28 @@ def create_app(
         payload: dict[str, Any] = Body(default_factory=dict),
     ) -> dict[str, Any]:
         return service_from(request).select_model(str(payload.get("filename", "")))
+
+    @app.post("/api/training-session/recording")
+    async def update_training_recording(
+        request: Request,
+        payload: TrainingRecordingRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service_from(request).set_training_recording_label(payload.label_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/training-session/complete")
+    async def complete_training_session(
+        request: Request,
+        payload: TrainingCompleteRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service_from(request).complete_training_session(payload.model_name)
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return app
 

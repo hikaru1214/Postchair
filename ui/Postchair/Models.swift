@@ -4,6 +4,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case connection
     case notifications
     case model
+    case modelCreation
     case about
 
     var id: String { rawValue }
@@ -13,6 +14,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .connection: return "接続"
         case .notifications: return "通知"
         case .model: return "モデル"
+        case .modelCreation: return "モデル作成"
         case .about: return "このアプリについて"
         }
     }
@@ -22,6 +24,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .connection: return "BLE と監視状態"
         case .notifications: return "通知タイミングと対象姿勢"
         case .model: return "推論モデルの選択と状態"
+        case .modelCreation: return "姿勢データ収集と新規モデル学習"
         case .about: return "アプリと実行環境の情報"
         }
     }
@@ -31,6 +34,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .connection: return "bolt.horizontal.circle"
         case .notifications: return "bell"
         case .model: return "cpu"
+        case .modelCreation: return "slider.horizontal.3"
         case .about: return "info.circle"
         }
     }
@@ -40,6 +44,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .connection: return .blue
         case .notifications: return .cyan
         case .model: return .green
+        case .modelCreation: return .indigo
         case .about: return .sky
         }
     }
@@ -252,6 +257,7 @@ struct MonitoringState: Codable {
     let startedAt: String?
     let lastFrameAt: String?
     let notificationEvent: NotificationEventPayload
+    let trainingSession: TrainingSessionState
 
     var resolvedConnectionState: ConnectionState {
         if connectionState != .stopped {
@@ -282,6 +288,7 @@ struct MonitoringState: Codable {
         case startedAt = "started_at"
         case lastFrameAt = "last_frame_at"
         case notificationEvent = "notification_event"
+        case trainingSession = "training_session"
     }
 
     init(
@@ -296,7 +303,8 @@ struct MonitoringState: Codable {
         lastError: String?,
         startedAt: String?,
         lastFrameAt: String?,
-        notificationEvent: NotificationEventPayload
+        notificationEvent: NotificationEventPayload,
+        trainingSession: TrainingSessionState
     ) {
         self.active = active
         self.connectionState = connectionState
@@ -310,6 +318,7 @@ struct MonitoringState: Codable {
         self.startedAt = startedAt
         self.lastFrameAt = lastFrameAt
         self.notificationEvent = notificationEvent
+        self.trainingSession = trainingSession
     }
 
     init(from decoder: any Decoder) throws {
@@ -327,6 +336,8 @@ struct MonitoringState: Codable {
         lastFrameAt = try container.decodeIfPresent(String.self, forKey: .lastFrameAt)
         notificationEvent = try container.decodeIfPresent(NotificationEventPayload.self, forKey: .notificationEvent)
             ?? NotificationEventPayload(sequence: 0, labelID: nil, label: nil, triggeredAt: nil)
+        trainingSession = try container.decodeIfPresent(TrainingSessionState.self, forKey: .trainingSession)
+            ?? .empty
     }
 
     init(dictionary: [String: Any]) {
@@ -354,6 +365,11 @@ struct MonitoringState: Codable {
         } else {
             notificationEvent = NotificationEventPayload(sequence: 0, labelID: nil, label: nil, triggeredAt: nil)
         }
+        if let raw = dictionary["training_session"] as? [String: Any] {
+            trainingSession = TrainingSessionState(dictionary: raw)
+        } else {
+            trainingSession = .empty
+        }
     }
 
     static let placeholder = MonitoringState(
@@ -368,8 +384,117 @@ struct MonitoringState: Codable {
         lastError: nil,
         startedAt: nil,
         lastFrameAt: nil,
-        notificationEvent: NotificationEventPayload(sequence: 0, labelID: nil, label: nil, triggeredAt: nil)
+        notificationEvent: NotificationEventPayload(sequence: 0, labelID: nil, label: nil, triggeredAt: nil),
+        trainingSession: .empty
     )
+}
+
+struct TrainingSessionState: Codable {
+    let activeLabelID: Int?
+    let activeLabel: LabelMetadata?
+    let samplesByLabelID: [String: Int]
+    let totalSamples: Int
+    let startedAt: String?
+    let lastRecordedAt: String?
+    let lastTrainingError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case activeLabelID = "active_label_id"
+        case activeLabel = "active_label"
+        case samplesByLabelID = "samples_by_label_id"
+        case totalSamples = "total_samples"
+        case startedAt = "started_at"
+        case lastRecordedAt = "last_recorded_at"
+        case lastTrainingError = "last_training_error"
+    }
+
+    init(
+        activeLabelID: Int?,
+        activeLabel: LabelMetadata?,
+        samplesByLabelID: [String: Int],
+        totalSamples: Int,
+        startedAt: String?,
+        lastRecordedAt: String?,
+        lastTrainingError: String?
+    ) {
+        self.activeLabelID = activeLabelID
+        self.activeLabel = activeLabel
+        self.samplesByLabelID = samplesByLabelID
+        self.totalSamples = totalSamples
+        self.startedAt = startedAt
+        self.lastRecordedAt = lastRecordedAt
+        self.lastTrainingError = lastTrainingError
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activeLabelID = try container.decodeIfPresent(Int.self, forKey: .activeLabelID)
+        activeLabel = try container.decodeIfPresent(LabelMetadata.self, forKey: .activeLabel)
+        samplesByLabelID = try container.decodeIfPresent([String: Int].self, forKey: .samplesByLabelID) ?? [:]
+        totalSamples = try container.decodeIfPresent(Int.self, forKey: .totalSamples) ?? 0
+        startedAt = try container.decodeIfPresent(String.self, forKey: .startedAt)
+        lastRecordedAt = try container.decodeIfPresent(String.self, forKey: .lastRecordedAt)
+        lastTrainingError = try container.decodeIfPresent(String.self, forKey: .lastTrainingError)
+    }
+
+    init(dictionary: [String: Any]) {
+        activeLabelID = dictionary["active_label_id"] as? Int
+        if let raw = dictionary["active_label"] as? [String: Any] {
+            activeLabel = LabelMetadata(dictionary: raw)
+        } else {
+            activeLabel = nil
+        }
+        samplesByLabelID = dictionary["samples_by_label_id"] as? [String: Int] ?? [:]
+        totalSamples = dictionary["total_samples"] as? Int ?? 0
+        startedAt = dictionary["started_at"] as? String
+        lastRecordedAt = dictionary["last_recorded_at"] as? String
+        lastTrainingError = dictionary["last_training_error"] as? String
+    }
+
+    static let empty = TrainingSessionState(
+        activeLabelID: nil,
+        activeLabel: nil,
+        samplesByLabelID: [:],
+        totalSamples: 0,
+        startedAt: nil,
+        lastRecordedAt: nil,
+        lastTrainingError: nil
+    )
+}
+
+struct TrainingResult {
+    let modelName: String
+    let modelFilename: String
+    let dataFilename: String
+    let sampleCount: Int
+    let accuracyText: String?
+
+    init(
+        modelName: String,
+        modelFilename: String,
+        dataFilename: String,
+        sampleCount: Int,
+        accuracyText: String?
+    ) {
+        self.modelName = modelName
+        self.modelFilename = modelFilename
+        self.dataFilename = dataFilename
+        self.sampleCount = sampleCount
+        self.accuracyText = accuracyText
+    }
+
+    init(dictionary: [String: Any]) {
+        modelName = dictionary["model_name"] as? String ?? ""
+        modelFilename = dictionary["model_filename"] as? String ?? ""
+        dataFilename = dictionary["data_filename"] as? String ?? ""
+        sampleCount = dictionary["sample_count"] as? Int ?? 0
+        if let metrics = dictionary["metrics"] as? [String: Any],
+           let accuracy = metrics["accuracy"] as? Double {
+            accuracyText = String(format: "%.3f", accuracy)
+        } else {
+            accuracyText = nil
+        }
+    }
 }
 
 struct NotificationSettingsPayload: Codable {
@@ -420,6 +545,11 @@ struct PostureLabelConfig: Identifiable {
     let id: Int
     let name: String
     let severity: String
+}
+
+struct TrainingLabelOption: Identifiable {
+    let id: Int
+    let name: String
 }
 
 struct LiveFrameSample: Identifiable {
@@ -541,6 +671,16 @@ struct NotificationSettingsState {
             focusMode: "indicator_only"
         )
     )
+}
+
+extension TrainingLabelOption {
+    static let allCases = [
+        TrainingLabelOption(id: 1, name: "良い姿勢"),
+        TrainingLabelOption(id: 3, name: "前傾姿勢"),
+        TrainingLabelOption(id: 2, name: "猫背"),
+        TrainingLabelOption(id: 5, name: "左足組み"),
+        TrainingLabelOption(id: 4, name: "右足組み"),
+    ]
 }
 
 enum AppAccent {

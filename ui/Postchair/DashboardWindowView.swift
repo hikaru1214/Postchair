@@ -58,6 +58,8 @@ struct DashboardWindowView: View {
             NotificationSectionView()
         case .model:
             ModelSectionView()
+        case .modelCreation:
+            ModelCreationSectionView()
         case .about:
             AboutSectionView()
         }
@@ -393,6 +395,150 @@ struct ModelSectionView: View {
                 }
             }
         }
+    }
+}
+
+struct ModelCreationSectionView: View {
+    @EnvironmentObject private var appState: AppState
+
+    private var activeLabelID: Int? {
+        appState.trainingSession.activeLabelID
+    }
+
+    private var canEditControls: Bool {
+        appState.monitoringState.active && !appState.isTrainingModel
+    }
+
+    private var canStartTraining: Bool {
+        canEditControls
+            && activeLabelID == nil
+            && appState.trainingSession.totalSamples > 0
+            && !appState.modelTrainingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            SurfaceCard(accent: .indigo) {
+                HStack(alignment: .top, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("姿勢データ収集")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
+                        Text("1つだけ ON にして記録し、切り替えるときは一度 OFF に戻してください")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
+                    }
+                    Spacer()
+                    PlaceholderChip(text: appState.monitoringState.active ? "監視中" : "監視停止")
+                }
+
+                ForEach(TrainingLabelOption.allCases) { label in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(label.name)
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
+                            Text("\(sampleCount(for: label.id))サンプル")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
+                        }
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { activeLabelID == label.id },
+                            set: { isOn in
+                                Task {
+                                    await appState.setTrainingRecordingLabel(isOn ? label.id : nil)
+                                }
+                            }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SidebarSection.modelCreation.accent.color)
+                        .disabled(!isToggleEnabled(for: label.id))
+                    }
+                }
+
+                if !appState.monitoringState.active {
+                    Text("データ収集前に、接続セクションで監視を開始してください。")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color.red.opacity(0.8))
+                }
+            }
+
+            SurfaceCard(accent: .indigo) {
+                Text("収集状態")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
+                MetricRow(title: "現在記録中", value: appState.trainingSession.activeLabel?.name ?? "なし")
+                MetricRow(title: "総サンプル数", value: "\(appState.trainingSession.totalSamples)")
+                MetricRow(title: "開始時刻", value: appState.trainingSession.startedAt ?? "未開始")
+                MetricRow(title: "最終記録", value: appState.trainingSession.lastRecordedAt ?? "未記録")
+
+                if let error = appState.trainingSession.lastTrainingError {
+                    Divider()
+                    Text(error)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color.red.opacity(0.8))
+                }
+            }
+
+            SurfaceCard(accent: .indigo) {
+                Text("モデル学習")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
+
+                TextField("モデル名", text: $appState.modelTrainingName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 16, weight: .medium))
+                    .disabled(!canEditControls)
+
+                if let message = appState.trainingMessage {
+                    Text(message)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(message.contains("学習完了") ? SidebarSection.modelCreation.accent.color : Color.red.opacity(0.8))
+                }
+
+                Button {
+                    Task {
+                        await appState.completeTrainingSession()
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        if appState.isTrainingModel {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(appState.isTrainingModel ? "学習中..." : "完了して学習")
+                            .font(.system(size: 17, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(SidebarSection.modelCreation.accent.color.opacity(canStartTraining ? 0.18 : 0.08))
+                    )
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(canStartTraining ? SidebarSection.modelCreation.accent.color : AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
+                .disabled(!canStartTraining)
+
+                Text("学習前にすべてのトグルを OFF に戻してください。今回の収集データだけで新しいモデルを作成します。")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
+            }
+        }
+    }
+
+    private func sampleCount(for labelID: Int) -> Int {
+        appState.trainingSession.samplesByLabelID[String(labelID)] ?? 0
+    }
+
+    private func isToggleEnabled(for labelID: Int) -> Bool {
+        guard canEditControls else { return false }
+        if let activeLabelID {
+            return activeLabelID == labelID
+        }
+        return true
     }
 }
 

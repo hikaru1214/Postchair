@@ -31,6 +31,7 @@ class RuntimeServiceTests(unittest.TestCase):
             model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
             model_path=Path(temp_dir) / "models" / "default.joblib",
             model_directory=Path(temp_dir) / "models",
+            training_data_directory=Path(temp_dir) / "data",
         )
 
     def ingest_labels(
@@ -360,6 +361,99 @@ class RuntimeServiceTests(unittest.TestCase):
             )
             self.assertEqual(reloaded.model_catalog()["current_model_filename"], "alternate.joblib")
 
+    def test_training_recording_requires_stop_before_switching_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+
+            state = service.set_training_recording_label(1)
+            self.assertEqual(state["active_label_id"], 1)
+
+            with self.assertRaises(ValueError):
+                service.set_training_recording_label(2)
+
+            state = service.set_training_recording_label(None)
+            self.assertEqual(state["active_label_id"], None)
+
+            state = service.set_training_recording_label(2)
+            self.assertEqual(state["active_label_id"], 2)
+
+    def test_training_recording_collects_rows_only_while_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+
+            service.set_training_recording_label(1)
+            service.ingest_frame(
+                FSRFrame(101, 202, 303, 404, received_at=start),
+                predicted_label=1,
+            )
+            service.set_training_recording_label(None)
+            service.ingest_frame(
+                FSRFrame(111, 222, 333, 444, received_at=start + timedelta(seconds=1)),
+                predicted_label=1,
+            )
+
+            training = service.monitoring_state()["training_session"]
+            self.assertEqual(training["total_samples"], 1)
+            self.assertEqual(training["samples_by_label_id"], {"1": 1})
+
+    def test_training_completion_saves_data_and_model_and_selects_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+
+            for label_id, offset in [(1, 0), (2, 10)]:
+                service.set_training_recording_label(label_id)
+                for step in range(10):
+                    service.ingest_frame(
+                        FSRFrame(
+                            300 + label_id + step,
+                            400 + label_id + step,
+                            500 + label_id + step,
+                            600 + label_id + step,
+                            received_at=start + timedelta(seconds=offset + step),
+                        ),
+                        predicted_label=label_id,
+                    )
+                service.set_training_recording_label(None)
+
+            result = service.complete_training_session("Session Model")
+            catalog = result["model_catalog"]
+            training_result = result["training_result"]
+
+            self.assertEqual(catalog["current_model_filename"], "session-model.joblib")
+            self.assertEqual(training_result["sample_count"], 20)
+            self.assertTrue((Path(temp_dir) / "models" / "session-model.joblib").exists())
+            self.assertTrue((Path(temp_dir) / "data" / training_result["data_filename"]).exists())
+            self.assertEqual(service.monitoring_state()["training_session"]["total_samples"], 0)
+
+    def test_training_completion_requires_samples_and_unique_model_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+
+            with self.assertRaises(ValueError):
+                service.complete_training_session("  ")
+
+            service.set_training_recording_label(1)
+            service.ingest_frame(
+                FSRFrame(
+                    100,
+                    200,
+                    300,
+                    400,
+                    received_at=datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc),
+                ),
+                predicted_label=1,
+            )
+            service.set_training_recording_label(None)
+
+            with self.assertRaises(ValueError):
+                service.complete_training_session("single-class")
+
 
 class RuntimeServerTests(unittest.TestCase):
     def test_http_endpoints_return_expected_shapes(self) -> None:
@@ -390,6 +484,33 @@ class RuntimeServerTests(unittest.TestCase):
                     json={"threshold_seconds": 30},
                 ).json()
                 self.assertEqual(settings["threshold_seconds"], 30)
+
+    def test_training_endpoints_follow_record_stop_train_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "models"
+            model_path = model_dir / "default.joblib"
+            write_model_file(model_path)
+            app = create_app(
+                service_factory=lambda: PostchairRuntimeService(
+                    settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
+                    model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
+                    model_path=model_path,
+                    model_directory=model_dir,
+                    training_data_directory=Path(temp_dir) / "data",
+                )
+            )
+
+            with TestClient(app) as client:
+                response = client.post("/api/training-session/recording", json={"label_id": 1})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["active_label_id"], 1)
+
+                conflict = client.post("/api/training-session/recording", json={"label_id": 2})
+                self.assertEqual(conflict.status_code, 400)
+
+                stop = client.post("/api/training-session/recording", json={"label_id": None})
+                self.assertEqual(stop.status_code, 200)
+                self.assertEqual(stop.json()["active_label_id"], None)
 
     def test_lifespan_stops_monitoring_on_shutdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

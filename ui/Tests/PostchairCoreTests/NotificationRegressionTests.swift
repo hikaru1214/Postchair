@@ -29,6 +29,10 @@ private struct FakeBackendClient: BackendClientProtocol {
         )
     }
     func updateSelectedModel(filename: String) async throws -> ModelCatalog { .placeholder }
+    func updateTrainingRecordingLabel(labelID: Int?) async throws -> TrainingSessionState { .empty }
+    func completeTrainingSession(modelName: String) async throws -> (ModelCatalog, TrainingResult) {
+        (.placeholder, TrainingResult(modelName: modelName, modelFilename: "", dataFilename: "", sampleCount: 0, accuracyText: nil))
+    }
 }
 
 private enum FakeNotificationError: LocalizedError {

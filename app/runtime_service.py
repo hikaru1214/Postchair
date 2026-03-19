@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
+import uuid
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.train_random_forest import DEFAULT_MODEL_PATH, load_model, predict_label
+from app.train_random_forest import (
+    DEFAULT_MODEL_PATH,
+    build_feature_vector_from_raw_values,
+    load_model,
+    predict_label,
+    save_model,
+    train_model,
+)
 from postchair_ble import (
     CHARACTERISTIC_UUID,
     DEVICE_NAME,
@@ -21,6 +30,7 @@ from postchair_ble import (
 VERSION = "0.1.0"
 DEFAULT_SETTINGS_PATH = Path("data/runtime-settings.json")
 DEFAULT_MODEL_SELECTION_PATH = Path("data/model-selection.json")
+DEFAULT_TRAINING_DATA_DIR = Path("data")
 DEFAULT_THRESHOLD_SECONDS = 60
 
 LABEL_METADATA: dict[int, dict[str, Any]] = {
@@ -71,6 +81,11 @@ def format_file_size(size_bytes: int) -> str:
     if unit == "B":
         return f"{int(value)} {unit}"
     return f"{value:.1f} {unit}"
+
+
+def slugify_model_name(name: str) -> str:
+    normalized = re.sub(r"[^0-9A-Za-z]+", "-", name.strip()).strip("-").lower()
+    return normalized or "custom-model"
 
 
 @dataclass(slots=True)
@@ -260,6 +275,7 @@ class MonitoringSnapshot:
     last_frame_at: datetime | None = None
     notification_event: NotificationEvent = field(default_factory=NotificationEvent)
     notification_debug: NotificationDebugState = field(default_factory=NotificationDebugState)
+    training_session: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -276,6 +292,42 @@ class MonitoringSnapshot:
             "last_frame_at": isoformat_or_none(self.last_frame_at),
             "notification_event": self.notification_event.to_dict(),
             "notification_debug": self.notification_debug.to_dict(),
+            "training_session": self.training_session,
+        }
+
+
+@dataclass(slots=True)
+class TrainingSessionState:
+    active_label_id: int | None = None
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    samples_by_label_id: dict[int, int] = field(default_factory=dict)
+    started_at: datetime | None = None
+    last_recorded_at: datetime | None = None
+    last_recorded_frame_timestamp: str | None = None
+    last_training_error: str | None = None
+
+    def reset(self) -> None:
+        self.active_label_id = None
+        self.rows.clear()
+        self.samples_by_label_id.clear()
+        self.started_at = None
+        self.last_recorded_at = None
+        self.last_recorded_frame_timestamp = None
+        self.last_training_error = None
+
+    @property
+    def total_samples(self) -> int:
+        return len(self.rows)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "active_label_id": self.active_label_id,
+            "active_label": LABEL_METADATA.get(self.active_label_id) if self.active_label_id is not None else None,
+            "samples_by_label_id": {str(key): value for key, value in sorted(self.samples_by_label_id.items())},
+            "total_samples": self.total_samples,
+            "started_at": isoformat_or_none(self.started_at),
+            "last_recorded_at": isoformat_or_none(self.last_recorded_at),
+            "last_training_error": self.last_training_error,
         }
 
 
@@ -335,6 +387,7 @@ class PostchairRuntimeService:
         model_selection_store: ModelSelectionStore | None = None,
         model_path: Path = DEFAULT_MODEL_PATH,
         model_directory: Path | None = None,
+        training_data_directory: Path = DEFAULT_TRAINING_DATA_DIR,
     ) -> None:
         self._lock = threading.RLock()
         self._settings_store = settings_store or RuntimeSettingsStore()
@@ -344,8 +397,10 @@ class PostchairRuntimeService:
         self._snapshot = MonitoringSnapshot()
         self._model_directory = model_directory or model_path.parent
         self._default_model_path = model_path
+        self._training_data_directory = training_data_directory
         self._model_path = model_path
         self._model = None
+        self._training_session = TrainingSessionState()
         self._monitor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._loop_ready = threading.Event()
@@ -415,8 +470,68 @@ class PostchairRuntimeService:
                 raise
             return self.model_catalog()
 
+    def set_training_recording_label(self, label_id: int | None) -> dict[str, Any]:
+        with self._lock:
+            if label_id is None:
+                self._training_session.active_label_id = None
+                self._snapshot.training_session = self._training_session.to_dict()
+                return self._snapshot.training_session
+
+            if label_id not in {1, 2, 3, 4, 5}:
+                raise ValueError("Unsupported training label")
+
+            active_label_id = self._training_session.active_label_id
+            if active_label_id is not None and active_label_id != label_id:
+                raise ValueError("Stop the current recording before selecting another posture")
+
+            if self._training_session.started_at is None:
+                self._training_session.started_at = utc_now()
+            self._training_session.active_label_id = label_id
+            self._training_session.last_training_error = None
+            self._snapshot.training_session = self._training_session.to_dict()
+            return self._snapshot.training_session
+
+    def complete_training_session(self, model_name: str) -> dict[str, Any]:
+        with self._lock:
+            trimmed_name = model_name.strip()
+            if not trimmed_name:
+                raise ValueError("Model name is required")
+            if self._training_session.active_label_id is not None:
+                raise ValueError("Stop the current recording before training")
+            if not self._training_session.rows:
+                raise ValueError("No training samples have been recorded")
+
+            slug = slugify_model_name(trimmed_name)
+            model_path = self._model_directory / f"{slug}.joblib"
+            if model_path.exists():
+                raise FileExistsError(f"Model '{model_path.name}' already exists")
+
+            try:
+                model, metrics = train_model(self._training_session.rows)
+                saved_data_path = self._save_training_rows(slug, self._training_session.rows)
+                saved_model_path = save_model(model, model_path)
+                self._load_selected_model(saved_model_path.name)
+                result = {
+                    "model_name": trimmed_name,
+                    "model_filename": saved_model_path.name,
+                    "data_filename": saved_data_path.name,
+                    "sample_count": len(self._training_session.rows),
+                    "metrics": metrics,
+                }
+                self._training_session.reset()
+                self._snapshot.training_session = self._training_session.to_dict()
+                return {
+                    "model_catalog": self.model_catalog(),
+                    "training_result": result,
+                }
+            except Exception as exc:
+                self._training_session.last_training_error = str(exc)
+                self._snapshot.training_session = self._training_session.to_dict()
+                raise
+
     def monitoring_state(self) -> dict[str, Any]:
         with self._lock:
+            self._snapshot.training_session = self._training_session.to_dict()
             state = self._snapshot.to_dict()
             state["current_model"] = self._model_path.name if self._model_path else None
             return state
@@ -460,6 +575,7 @@ class PostchairRuntimeService:
             self._snapshot.connection_state = "stopped"
             self._snapshot.device_address = None
             self._tracker.reset()
+            self._snapshot.training_session = self._training_session.to_dict()
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         return self.monitoring_state()
@@ -492,6 +608,7 @@ class PostchairRuntimeService:
             }
             self._snapshot.latest_label_id = label_id
             self._snapshot.latest_label_metadata = LABEL_METADATA.get(label_id)
+            self._record_training_row_if_needed(frame, observed_at)
             event = self._tracker.evaluate(label_id, observed_at, self._settings)
             self._snapshot.notification_debug = NotificationDebugState(
                 observation_count=self._tracker.debug_state.observation_count,
@@ -509,6 +626,7 @@ class PostchairRuntimeService:
                     label_id=event.label_id,
                     triggered_at=event.triggered_at,
                 )
+            self._snapshot.training_session = self._training_session.to_dict()
             return self._snapshot
 
     def _available_model_paths(self) -> list[Path]:
@@ -535,6 +653,53 @@ class PostchairRuntimeService:
         self._snapshot.model_loaded = True
         self._snapshot.last_error = None
         self._model_selection_store.save(model_path.name)
+
+    def _record_training_row_if_needed(self, frame: FSRFrame, observed_at: datetime) -> None:
+        active_label_id = self._training_session.active_label_id
+        if active_label_id is None:
+            return
+
+        received_at = isoformat_or_none(observed_at)
+        if not received_at:
+            return
+        if received_at == self._training_session.last_recorded_frame_timestamp:
+            return
+
+        features = build_feature_vector_from_raw_values(
+            frame.left_foot,
+            frame.right_foot,
+            frame.center,
+            frame.rear,
+        )
+        row = {
+            "id": str(uuid.uuid4()),
+            "created_at": received_at,
+            "raw_left_front": frame.left_foot,
+            "raw_right_front": frame.right_foot,
+            "raw_center": frame.center,
+            "raw_back": frame.rear,
+            "norm_left_front": features[4],
+            "norm_right_front": features[5],
+            "norm_center": features[6],
+            "norm_back": features[7],
+            "label": active_label_id,
+        }
+        self._training_session.rows.append(row)
+        self._training_session.samples_by_label_id[active_label_id] = (
+            self._training_session.samples_by_label_id.get(active_label_id, 0) + 1
+        )
+        self._training_session.last_recorded_at = observed_at
+        self._training_session.last_recorded_frame_timestamp = received_at
+
+    def _save_training_rows(self, slug: str, rows: list[dict[str, Any]]) -> Path:
+        timestamp = utc_now().strftime("%Y%m%d%H%M%S")
+        output_path = self._training_data_directory / f"sensor-data-{timestamp}-{slug}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return output_path
 
     def _run_monitor_loop(
         self,

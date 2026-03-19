@@ -15,6 +15,8 @@ protocol BackendClientProtocol {
         focusMode: String
     ) async throws -> NotificationSettingsPayload
     func updateSelectedModel(filename: String) async throws -> ModelCatalog
+    func updateTrainingRecordingLabel(labelID: Int?) async throws -> TrainingSessionState
+    func completeTrainingSession(modelName: String) async throws -> (ModelCatalog, TrainingResult)
 }
 
 struct BackendClient: BackendClientProtocol {
@@ -75,6 +77,37 @@ struct BackendClient: BackendClientProtocol {
         return ModelCatalog(dictionary: try await requestObject(path: "/api/model", method: "PUT", body: body))
     }
 
+    func updateTrainingRecordingLabel(labelID: Int?) async throws -> TrainingSessionState {
+        struct Payload: Encodable {
+            let labelID: Int?
+
+            enum CodingKeys: String, CodingKey {
+                case labelID = "label_id"
+            }
+        }
+
+        let body = try encoder.encode(Payload(labelID: labelID))
+        return TrainingSessionState(
+            dictionary: try await requestObject(path: "/api/training-session/recording", method: "POST", body: body)
+        )
+    }
+
+    func completeTrainingSession(modelName: String) async throws -> (ModelCatalog, TrainingResult) {
+        struct Payload: Encodable {
+            let modelName: String
+
+            enum CodingKeys: String, CodingKey {
+                case modelName = "model_name"
+            }
+        }
+
+        let body = try encoder.encode(Payload(modelName: modelName))
+        let response = try await requestObject(path: "/api/training-session/complete", method: "POST", body: body)
+        let modelCatalog = ModelCatalog(dictionary: response["model_catalog"] as? [String: Any] ?? [:])
+        let trainingResult = TrainingResult(dictionary: response["training_result"] as? [String: Any] ?? [:])
+        return (modelCatalog, trainingResult)
+    }
+
     func makeNotificationSettingsBody(
         enabled: Bool,
         thresholdSeconds: Int,
@@ -121,7 +154,8 @@ struct BackendClient: BackendClientProtocol {
             throw BackendClientError.invalidResponse
         }
         guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            throw BackendClientError.server(statusCode: httpResponse.statusCode)
+            let bodyText = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            throw BackendClientError.server(statusCode: httpResponse.statusCode, body: bodyText)
         }
         do {
             let json = try JSONSerialization.jsonObject(with: data)
@@ -138,7 +172,7 @@ struct BackendClient: BackendClientProtocol {
 
 enum BackendClientError: LocalizedError {
     case invalidResponse
-    case server(statusCode: Int)
+    case server(statusCode: Int, body: String)
     case transport(path: String, underlying: Error)
     case decode(path: String, message: String, body: String)
 
@@ -146,8 +180,8 @@ enum BackendClientError: LocalizedError {
         switch self {
         case .invalidResponse:
             return "バックエンドから不正なレスポンスを受信しました。"
-        case let .server(statusCode):
-            return "バックエンドエラー: \(statusCode)"
+        case let .server(statusCode, body):
+            return "バックエンドエラー: \(statusCode) \(body)"
         case let .transport(path, underlying):
             return "バックエンド通信失敗 \(path): \(underlying.localizedDescription)"
         case let .decode(path, message, body):

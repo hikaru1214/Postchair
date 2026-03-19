@@ -55,6 +55,10 @@ final class AppState: NSObject, ObservableObject {
     @Published var monitoringState = MonitoringState.placeholder
     @Published var notificationSettings = NotificationSettingsState.defaultState
     @Published var modelCatalog = ModelCatalog.placeholder
+    @Published var trainingSession = TrainingSessionState.empty
+    @Published var modelTrainingName = ""
+    @Published var isTrainingModel = false
+    @Published var trainingMessage: String?
     @Published var backendLaunchError: String?
     @Published var isLoading = false
     @Published var frameHistory: [LiveFrameSample] = []
@@ -230,6 +234,41 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
+    func setTrainingRecordingLabel(_ labelID: Int?) async {
+        do {
+            trainingSession = try await backendClient.updateTrainingRecordingLabel(labelID: labelID)
+            trainingMessage = nil
+        } catch {
+            backendLaunchError = error.localizedDescription
+            trainingMessage = error.localizedDescription
+        }
+    }
+
+    func completeTrainingSession() async {
+        guard !isTrainingModel else { return }
+        let trimmedName = modelTrainingName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            trainingMessage = "モデル名を入力してください。"
+            return
+        }
+
+        isTrainingModel = true
+        defer { isTrainingModel = false }
+
+        do {
+            let (catalog, result) = try await backendClient.completeTrainingSession(modelName: trimmedName)
+            modelCatalog = catalog
+            modelTrainingName = ""
+            trainingMessage = makeTrainingSuccessMessage(result: result)
+            await refreshBackendStatus()
+            await refreshMonitoringState()
+        } catch {
+            backendLaunchError = error.localizedDescription
+            trainingMessage = error.localizedDescription
+            await refreshMonitoringState()
+        }
+    }
+
     func refreshNow() async {
         await refreshAll()
     }
@@ -277,6 +316,7 @@ final class AppState: NSObject, ObservableObject {
     private func refreshMonitoringState() async {
         do {
             monitoringState = try await backendClient.fetchMonitoringState()
+            trainingSession = monitoringState.trainingSession
             recordHistoryIfNeeded()
             if monitoringState.lastError == nil, backendStatus.lastError == nil {
                 backendLaunchError = nil
@@ -394,6 +434,13 @@ final class AppState: NSObject, ObservableObject {
 
     var deliveredNotificationSequenceForTesting: Int {
         lastDeliveredNotificationSequence
+    }
+
+    private func makeTrainingSuccessMessage(result: TrainingResult) -> String {
+        if let accuracyText = result.accuracyText {
+            return "学習完了: \(result.modelFilename) / \(result.sampleCount)件 / accuracy \(accuracyText)"
+        }
+        return "学習完了: \(result.modelFilename) / \(result.sampleCount)件"
     }
 }
 

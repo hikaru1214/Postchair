@@ -27,15 +27,36 @@ def write_model_file(path: Path) -> None:
 
 
 class RuntimeServiceTests(unittest.TestCase):
+    def make_service(self, temp_dir: str) -> PostchairRuntimeService:
+        return PostchairRuntimeService(
+            settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
+            model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
+            model_path=Path(temp_dir) / "models" / "default.joblib",
+            model_directory=Path(temp_dir) / "models",
+        )
+
+    def ingest_labels(
+        self,
+        service: PostchairRuntimeService,
+        start: datetime,
+        labels: list[int],
+    ) -> None:
+        for offset, label_id in enumerate(labels):
+            service.ingest_frame(
+                FSRFrame(
+                    10 + offset,
+                    20 + offset,
+                    30 + offset,
+                    40 + offset,
+                    received_at=start + timedelta(seconds=offset),
+                ),
+                predicted_label=label_id,
+            )
+
     def test_health_and_status_exist_before_monitoring(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             write_model_file(Path(temp_dir) / "models" / "default.joblib")
-            service = PostchairRuntimeService(
-                settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
-                model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
-                model_path=Path(temp_dir) / "models" / "default.joblib",
-                model_directory=Path(temp_dir) / "models",
-            )
+            service = self.make_service(temp_dir)
 
             self.assertEqual(service.health()["ok"], True)
             status = service.backend_status()
@@ -46,16 +67,11 @@ class RuntimeServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             write_model_file(Path(temp_dir) / "models" / "default.joblib")
             settings_path = Path(temp_dir) / "settings.json"
-            service = PostchairRuntimeService(
-                settings_store=RuntimeSettingsStore(settings_path),
-                model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
-                model_path=Path(temp_dir) / "models" / "default.joblib",
-                model_directory=Path(temp_dir) / "models",
-            )
+            service = self.make_service(temp_dir)
             payload = {
                 "enabled": False,
                 "threshold_seconds": 25,
-                "enabled_label_ids": [1, 3],
+                "enabled_label_ids": [2, 4],
             }
 
             updated = service.update_notification_settings(payload)
@@ -68,49 +84,137 @@ class RuntimeServiceTests(unittest.TestCase):
 
             self.assertEqual(updated["enabled"], False)
             self.assertEqual(reloaded.notification_settings()["threshold_seconds"], 25)
-            self.assertEqual(reloaded.notification_settings()["enabled_label_ids"], [1, 3])
+            self.assertEqual(reloaded.notification_settings()["enabled_label_ids"], [2, 4])
 
-    def test_continuous_bad_posture_triggers_once_and_resets(self) -> None:
+    def test_notification_triggers_at_eighty_percent_with_full_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             write_model_file(Path(temp_dir) / "models" / "default.joblib")
-            service = PostchairRuntimeService(
-                settings_store=RuntimeSettingsStore(Path(temp_dir) / "settings.json"),
-                model_selection_store=ModelSelectionStore(Path(temp_dir) / "model.json"),
-                model_path=Path(temp_dir) / "models" / "default.joblib",
-                model_directory=Path(temp_dir) / "models",
-            )
+            service = self.make_service(temp_dir)
             service.update_notification_settings(
                 NotificationSettings(
                     enabled=True,
                     threshold_seconds=10,
-                    enabled_label_ids=[1, 2, 3],
+                    enabled_label_ids=[2, 3, 4, 5],
                 ).to_dict()
             )
 
             start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
-            first = FSRFrame(10, 20, 30, 40, received_at=start)
-            second = FSRFrame(11, 21, 31, 41, received_at=start + timedelta(seconds=11))
-            third = FSRFrame(12, 22, 32, 42, received_at=start + timedelta(seconds=12))
-            reset = FSRFrame(13, 23, 33, 43, received_at=start + timedelta(seconds=13))
-            retrigger = FSRFrame(14, 24, 34, 44, received_at=start + timedelta(seconds=24))
+            self.ingest_labels(service, start, [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+            self.assertEqual(service.monitoring_state()["notification_event"]["label_id"], 2)
 
-            service.ingest_frame(first, predicted_label=1)
+    def test_notification_does_not_trigger_before_window_is_filled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 10)
             self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
 
-            service.ingest_frame(second, predicted_label=1)
-            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
-
-            service.ingest_frame(third, predicted_label=1)
-            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
-
-            service.ingest_frame(reset, predicted_label=0)
-            service.ingest_frame(retrigger, predicted_label=1)
-            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
-
-            service.ingest_frame(
-                FSRFrame(15, 25, 35, 45, received_at=start + timedelta(seconds=35)),
-                predicted_label=1,
+    def test_notification_does_not_trigger_at_seventy_nine_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
             )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 8 + [1, 1, 1])
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+
+    def test_notification_does_not_trigger_for_mixed_bad_postures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2, 3] * 5 + [2])
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 0)
+
+    def test_notification_retriggers_after_ratio_drops_below_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+
+            self.ingest_labels(service, start + timedelta(seconds=11), [1] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+
+            self.ingest_labels(service, start + timedelta(seconds=22), [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 2)
+
+    def test_notification_state_resets_when_settings_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+
+            service.update_notification_settings({"enabled_label_ids": [3, 4, 5]})
+            self.ingest_labels(service, start + timedelta(seconds=20), [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+
+            service.update_notification_settings({"enabled_label_ids": [2, 3, 4, 5]})
+            self.ingest_labels(service, start + timedelta(seconds=40), [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 2)
+
+    def test_notification_state_resets_when_monitoring_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            service.update_notification_settings(
+                NotificationSettings(
+                    enabled=True,
+                    threshold_seconds=10,
+                    enabled_label_ids=[2, 3, 4, 5],
+                ).to_dict()
+            )
+
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+            self.ingest_labels(service, start, [2] * 11)
+            self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 1)
+
+            service.stop_monitoring()
+            self.ingest_labels(service, start + timedelta(seconds=20), [2] * 11)
             self.assertEqual(service.monitoring_state()["notification_event"]["sequence"], 2)
 
     def test_model_catalog_and_selection(self) -> None:

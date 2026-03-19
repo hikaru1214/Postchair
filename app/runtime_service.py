@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,10 +24,12 @@ DEFAULT_MODEL_SELECTION_PATH = Path("data/model-selection.json")
 DEFAULT_THRESHOLD_SECONDS = 60
 
 LABEL_METADATA: dict[int, dict[str, Any]] = {
-    0: {"id": 0, "name": "未着席 / 不明", "severity": "neutral"},
-    1: {"id": 1, "name": "猫背", "severity": "warning"},
-    2: {"id": 2, "name": "前のめり", "severity": "warning"},
-    3: {"id": 3, "name": "足組み", "severity": "warning"},
+    0: {"id": 0, "name": "離席", "severity": "neutral"},
+    1: {"id": 1, "name": "良い姿勢", "severity": "positive"},
+    2: {"id": 2, "name": "猫背", "severity": "warning"},
+    3: {"id": 3, "name": "前傾姿勢", "severity": "warning"},
+    4: {"id": 4, "name": "右足組み", "severity": "warning"},
+    5: {"id": 5, "name": "左足組み", "severity": "warning"},
 }
 
 
@@ -58,7 +61,7 @@ def format_file_size(size_bytes: int) -> str:
 class NotificationSettings:
     enabled: bool = True
     threshold_seconds: int = DEFAULT_THRESHOLD_SECONDS
-    enabled_label_ids: list[int] = field(default_factory=lambda: [1, 2, 3])
+    enabled_label_ids: list[int] = field(default_factory=lambda: [2, 3, 4, 5])
     focus_mode: str = "indicator_only"
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,7 +80,7 @@ class NotificationSettings:
             enabled_label_ids=sorted(
                 {
                     int(label_id)
-                    for label_id in payload.get("enabled_label_ids", [1, 2, 3])
+                    for label_id in payload.get("enabled_label_ids", [2, 3, 4, 5])
                     if int(label_id) in LABEL_METADATA
                 }
             ),
@@ -101,18 +104,25 @@ class NotificationEvent:
 
 
 @dataclass(slots=True)
+class NotificationObservation:
+    label_id: int | None
+    observed_at: datetime
+
+
+@dataclass(slots=True)
 class NotificationTracker:
-    active_label_id: int | None = None
-    started_at: datetime | None = None
-    last_emitted_label_id: int | None = None
-    last_emitted_started_at: datetime | None = None
+    observations: deque[NotificationObservation] = field(default_factory=deque)
+    active_notifications: set[int] = field(default_factory=set)
     event: NotificationEvent = field(default_factory=NotificationEvent)
 
     def reset(self) -> None:
-        self.active_label_id = None
-        self.started_at = None
-        self.last_emitted_label_id = None
-        self.last_emitted_started_at = None
+        self.observations.clear()
+        self.active_notifications.clear()
+
+    def _prune_observations(self, observed_at: datetime, threshold_seconds: int) -> None:
+        window_start = observed_at.timestamp() - threshold_seconds
+        while self.observations and self.observations[0].observed_at.timestamp() < window_start:
+            self.observations.popleft()
 
     def evaluate(
         self,
@@ -120,36 +130,42 @@ class NotificationTracker:
         observed_at: datetime,
         settings: NotificationSettings,
     ) -> NotificationEvent | None:
-        if not settings.enabled or label_id is None or label_id not in settings.enabled_label_ids:
-            self.active_label_id = None
-            self.started_at = None
-            self.last_emitted_label_id = None if label_id is None else self.last_emitted_label_id
-            self.last_emitted_started_at = None if label_id is None else self.last_emitted_started_at
+        if not settings.enabled:
+            self.reset()
             return None
 
-        if self.active_label_id != label_id:
-            self.active_label_id = label_id
-            self.started_at = observed_at
-            self.last_emitted_label_id = None
-            self.last_emitted_started_at = None
+        self.observations.append(NotificationObservation(label_id=label_id, observed_at=observed_at))
+        self._prune_observations(observed_at, settings.threshold_seconds)
+        total_count = len(self.observations)
+        if total_count == 0:
+            return None
+        if (observed_at - self.observations[0].observed_at).total_seconds() < settings.threshold_seconds:
             return None
 
-        if self.started_at is None:
-            self.started_at = observed_at
+        counts = Counter(observation.label_id for observation in self.observations)
+        qualifying_label_ids = [
+            candidate_label_id
+            for candidate_label_id in settings.enabled_label_ids
+            if counts.get(candidate_label_id, 0) / total_count >= 0.8
+        ]
+
+        active_now = set(qualifying_label_ids)
+        self.active_notifications.intersection_update(active_now)
+        if not qualifying_label_ids:
             return None
 
-        elapsed = (observed_at - self.started_at).total_seconds()
-        if elapsed < settings.threshold_seconds:
-            return None
+        if label_id in qualifying_label_ids:
+            selected_label_id = label_id
+        else:
+            selected_label_id = qualifying_label_ids[0]
 
-        if self.last_emitted_label_id == label_id and self.last_emitted_started_at == self.started_at:
+        if selected_label_id in self.active_notifications:
             return None
 
         self.event.sequence += 1
-        self.event.label_id = label_id
+        self.event.label_id = selected_label_id
         self.event.triggered_at = observed_at
-        self.last_emitted_label_id = label_id
-        self.last_emitted_started_at = self.started_at
+        self.active_notifications.add(selected_label_id)
         return self.event
 
 
@@ -285,8 +301,7 @@ class PostchairRuntimeService:
             merged.update(payload)
             self._settings = NotificationSettings.from_dict(merged)
             self._settings_store.save(self._settings)
-            self._tracker.active_label_id = None
-            self._tracker.started_at = None
+            self._tracker.reset()
             return self._settings.to_dict()
 
     def model_catalog(self) -> dict[str, Any]:

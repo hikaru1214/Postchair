@@ -53,12 +53,12 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "POSTCHAIR_BACKEND_ROOT"
-            value = "/Users/fujimakitaketo/projects/Postchair"
+            value = "/Users/hikaru/code/Postchair"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "POSTCHAIR_PYTHON_PATH"
-            value = "/Users/fujimakitaketo/projects/Postchair/.venv/bin/python"
+            value = "/Users/hikaru/code/Postchair/.venv/bin/python"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>

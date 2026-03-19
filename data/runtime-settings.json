@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "threshold_seconds": 10,
   "enabled_label_ids": [
     2,

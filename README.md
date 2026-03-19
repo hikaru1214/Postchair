@@ -154,13 +154,13 @@ curl http://127.0.0.1:8000/health
 Xcode で `ui/Postchair.xcodeproj` を開き、対象 Scheme の `Run > Arguments > Environment Variables` に次を設定してください。
 
 ```text
-POSTCHAIR_BACKEND_ROOT=/Users/fujimakitaketo/projects/Postchair
+POSTCHAIR_BACKEND_ROOT=/path/to/Postchair
 ```
 
 必要なら Python 実行ファイルも明示します。
 
 ```text
-POSTCHAIR_PYTHON_PATH=/Users/fujimakitaketo/projects/Postchair/.venv/bin/python
+POSTCHAIR_PYTHON_PATH=/path/to/Postchair/.venv/bin/python
 ```
 
 その後、Xcode から macOS アプリを起動します。  

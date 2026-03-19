@@ -49,6 +49,12 @@ uv sync
 uv run postchair-train
 ```
 
+別名で保存したい場合:
+
+```bash
+uv run postchair-train --output-path models/random_forest_label_20260319.joblib
+```
+
 実行すると次を行います。
 
 - `data/sensor-data-*.json` を読み込む

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,25 @@ TARGET_COLUMN = "label"
 REQUIRED_COLUMNS = FEATURE_COLUMNS + (TARGET_COLUMN,)
 DEFAULT_DATA_DIR = Path("data")
 DEFAULT_MODEL_PATH = Path("models/random_forest_label.joblib")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train a RandomForest posture classifier from sensor JSON files."
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DEFAULT_DATA_DIR,
+        help="Directory containing sensor-data-*.json files.",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=Path,
+        default=DEFAULT_MODEL_PATH,
+        help="Path to save the trained model.",
+    )
+    return parser.parse_args()
 
 
 def build_feature_vector_from_raw_values(
@@ -190,9 +210,10 @@ def format_metrics(metrics: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    rows = load_training_rows()
+    args = parse_args()
+    rows = load_training_rows(args.data_dir)
     model, metrics = train_model(rows)
-    output_path = save_model(model)
+    output_path = save_model(model, args.output_path)
     print(format_metrics(metrics))
     print(f"Saved model: {output_path}")
 

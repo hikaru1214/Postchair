@@ -1,3 +1,4 @@
 [console_scripts]
 postchair-ble = postchair_ble:main
+postchair-server = postchair_server:main
 postchair-train = app.train_random_forest:main

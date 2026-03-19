@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from postchair_ble import main
 
 

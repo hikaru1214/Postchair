@@ -4,11 +4,13 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 DEVICE_NAME = "ESP32_SmartSensor"
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+DEFAULT_MODEL_PATH = Path("models/random_forest_label.joblib")
 
 
 class FrameParseError(ValueError):
@@ -105,6 +107,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="Seconds to wait when scanning by device name.",
     )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        help=(
+            "Path to a trained RandomForest model. "
+            f"If provided without a value, defaults to {DEFAULT_MODEL_PATH}."
+        ),
+        nargs="?",
+        const=DEFAULT_MODEL_PATH,
+    )
     return parser
 
 
@@ -114,16 +126,35 @@ async def async_main() -> None:
         device_name=args.name,
         scan_timeout=args.scan_timeout,
     )
+    model = None
+    predict_frame_label: Callable[[FSRFrame], int] | None = None
+    if args.model_path:
+        from app.train_random_forest import load_model, predict_label
+
+        model = load_model(args.model_path)
+
+        def predict_frame_label(frame: FSRFrame) -> int:
+            return predict_label(
+                model,
+                raw_left_front=frame.left_foot,
+                raw_right_front=frame.right_foot,
+                raw_center=frame.center,
+                raw_back=frame.rear,
+            )
 
     def print_frame(frame: FSRFrame) -> None:
         timestamp = frame.received_at.isoformat(timespec="milliseconds")
-        print(
+        message = (
             f"{timestamp} "
             f"center={frame.center} "
             f"left_foot={frame.left_foot} "
             f"rear={frame.rear} "
             f"right_foot={frame.right_foot}"
         )
+        if predict_frame_label is not None:
+            predicted_label = predict_frame_label(frame)
+            message = f"{message} predicted_label={predicted_label}"
+        print(message)
 
     await stream_fsr_notifications(address=address, on_frame=print_frame)
 

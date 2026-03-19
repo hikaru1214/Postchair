@@ -1,0 +1,3 @@
+[console_scripts]
+postchair-ble = postchair_ble:main
+postchair-train = app.train_random_forest:main

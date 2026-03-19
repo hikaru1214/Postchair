@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: postchair
+Version: 0.1.0
+Summary: BLE client for receiving FSR data from the Postchair ESP32 device.
+Requires-Python: >=3.12
+Requires-Dist: bleak>=2.1.1
+Requires-Dist: joblib>=1.4.2
+Requires-Dist: scikit-learn>=1.7.1

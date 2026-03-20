@@ -675,6 +675,7 @@ struct NotificationSettingsState {
 
 extension TrainingLabelOption {
     static let allCases = [
+        TrainingLabelOption(id: 0, name: "離席"),
         TrainingLabelOption(id: 1, name: "良い姿勢"),
         TrainingLabelOption(id: 3, name: "前傾姿勢"),
         TrainingLabelOption(id: 2, name: "猫背"),

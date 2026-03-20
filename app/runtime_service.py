@@ -477,7 +477,7 @@ class PostchairRuntimeService:
                 self._snapshot.training_session = self._training_session.to_dict()
                 return self._snapshot.training_session
 
-            if label_id not in {1, 2, 3, 4, 5}:
+            if label_id not in LABEL_METADATA:
                 raise ValueError("Unsupported training label")
 
             active_label_id = self._training_session.active_label_id

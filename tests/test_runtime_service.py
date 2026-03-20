@@ -366,8 +366,8 @@ class RuntimeServiceTests(unittest.TestCase):
             write_model_file(Path(temp_dir) / "models" / "default.joblib")
             service = self.make_service(temp_dir)
 
-            state = service.set_training_recording_label(1)
-            self.assertEqual(state["active_label_id"], 1)
+            state = service.set_training_recording_label(0)
+            self.assertEqual(state["active_label_id"], 0)
 
             with self.assertRaises(ValueError):
                 service.set_training_recording_label(2)
@@ -377,6 +377,25 @@ class RuntimeServiceTests(unittest.TestCase):
 
             state = service.set_training_recording_label(2)
             self.assertEqual(state["active_label_id"], 2)
+
+    def test_training_recording_accepts_away_label_and_counts_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            recorded_at = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+
+            state = service.set_training_recording_label(0)
+            self.assertEqual(state["active_label_id"], 0)
+
+            service.ingest_frame(
+                FSRFrame(10, 20, 30, 40, received_at=recorded_at),
+                predicted_label=0,
+            )
+            service.set_training_recording_label(None)
+
+            training = service.monitoring_state()["training_session"]
+            self.assertEqual(training["total_samples"], 1)
+            self.assertEqual(training["samples_by_label_id"], {"0": 1})
 
     def test_training_recording_collects_rows_only_while_active(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

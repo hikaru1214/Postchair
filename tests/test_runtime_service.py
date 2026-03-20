@@ -449,6 +449,65 @@ class RuntimeServiceTests(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "data" / training_result["data_filename"]).exists())
             self.assertEqual(service.monitoring_state()["training_session"]["total_samples"], 0)
 
+    def test_away_training_flow_saves_data_trains_model_and_uses_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_model_file(Path(temp_dir) / "models" / "default.joblib")
+            service = self.make_service(temp_dir)
+            start = datetime(2026, 3, 19, 0, 0, tzinfo=timezone.utc)
+
+            for step in range(10):
+                service.set_training_recording_label(0)
+                service.ingest_frame(
+                    FSRFrame(
+                        center=step,
+                        left_foot=step,
+                        rear=step,
+                        right_foot=step,
+                        received_at=start + timedelta(seconds=step),
+                    ),
+                    predicted_label=0,
+                )
+            service.set_training_recording_label(None)
+
+            for step in range(10):
+                service.set_training_recording_label(1)
+                service.ingest_frame(
+                    FSRFrame(
+                        center=900 + step,
+                        left_foot=950 + step,
+                        rear=920 + step,
+                        right_foot=940 + step,
+                        received_at=start + timedelta(seconds=20 + step),
+                    ),
+                    predicted_label=1,
+                )
+            service.set_training_recording_label(None)
+
+            result = service.complete_training_session("Away Session")
+            training_result = result["training_result"]
+            catalog = result["model_catalog"]
+            saved_rows = json.loads(
+                (Path(temp_dir) / "data" / training_result["data_filename"]).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(training_result["sample_count"], 20)
+            self.assertEqual(catalog["current_model_filename"], "away-session.joblib")
+            self.assertTrue((Path(temp_dir) / "models" / "away-session.joblib").exists())
+            self.assertEqual({row["label"] for row in saved_rows}, {0, 1})
+
+            snapshot = service.ingest_frame(
+                FSRFrame(
+                    center=1,
+                    left_foot=1,
+                    rear=0,
+                    right_foot=1,
+                    received_at=start + timedelta(seconds=60),
+                )
+            )
+
+            self.assertEqual(snapshot.latest_label_id, 0)
+            self.assertEqual(snapshot.latest_label_metadata, {"id": 0, "name": "離席", "severity": "neutral"})
+
     def test_training_completion_requires_samples_and_unique_model_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             write_model_file(Path(temp_dir) / "models" / "default.joblib")

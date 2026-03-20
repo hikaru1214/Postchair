@@ -433,29 +433,64 @@ struct ModelCreationSectionView: View {
                 }
 
                 ForEach(TrainingLabelOption.allCases) { label in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(label.name)
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
-                            Text("\(sampleCount(for: label.id))サンプル")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
+                    Button {
+                        Task {
+                            await appState.setTrainingRecordingLabel(
+                                activeLabelID == label.id ? nil : label.id
+                            )
                         }
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { activeLabelID == label.id },
-                            set: { isOn in
-                                Task {
-                                    await appState.setTrainingRecordingLabel(isOn ? label.id : nil)
-                                }
+                    } label: {
+                        HStack(spacing: 18) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(label.name)
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundStyle(AppColors.bodyText(nightMode: appState.isNightModeEnabled))
+                                Text("\(sampleCount(for: label.id))サンプル")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(AppColors.secondaryText(nightMode: appState.isNightModeEnabled))
                             }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SidebarSection.modelCreation.accent.color)
-                        .disabled(!isToggleEnabled(for: label.id))
+                            Spacer()
+                            HStack(spacing: 8) {
+                                Image(systemName: activeLabelID == label.id ? "pause.fill" : "record.circle")
+                                    .font(.system(size: 14, weight: .bold))
+                                Text(activeLabelID == label.id ? "停止" : "記録開始")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            .foregroundStyle(activeLabelID == label.id ? Color.white : SidebarSection.modelCreation.accent.color)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(
+                                        activeLabelID == label.id
+                                            ? SidebarSection.modelCreation.accent.color
+                                            : SidebarSection.modelCreation.accent.color.opacity(0.14)
+                                    )
+                            )
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(
+                                    activeLabelID == label.id
+                                        ? SidebarSection.modelCreation.accent.color.opacity(0.12)
+                                        : (appState.isNightModeEnabled ? Color.white.opacity(0.04) : Color.white.opacity(0.56))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                        .stroke(
+                                            activeLabelID == label.id
+                                                ? SidebarSection.modelCreation.accent.color.opacity(0.35)
+                                                : AppColors.cardBorder(nightMode: appState.isNightModeEnabled),
+                                            lineWidth: 1
+                                        )
+                                )
+                        )
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!isToggleEnabled(for: label.id))
+                    .opacity(isToggleEnabled(for: label.id) ? 1 : 0.55)
                 }
 
                 if !appState.monitoringState.active {
